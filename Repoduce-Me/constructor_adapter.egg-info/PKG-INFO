@@ -1,0 +1,11 @@
+Metadata-Version: 2.1
+Name: constructor-adapter
+Version: 0.3.1
+Summary: A Python package for interacting with Constructor APIs
+Home-page: https://github.com/GiancarloSucci/ConstructorAdapter
+Author: Your Name
+Author-email: giancarlo.succi@gmail.com
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.7

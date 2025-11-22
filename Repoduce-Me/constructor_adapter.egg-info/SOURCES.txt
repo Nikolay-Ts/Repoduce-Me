@@ -1,0 +1,7 @@
+paper_extracter.py
+setup.py
+constructor_adapter.egg-info/PKG-INFO
+constructor_adapter.egg-info/SOURCES.txt
+constructor_adapter.egg-info/dependency_links.txt
+constructor_adapter.egg-info/requires.txt
+constructor_adapter.egg-info/top_level.txt
