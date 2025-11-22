@@ -1,0 +1,3 @@
+PyPDF2
+constructor_adapter
+langchain_openai
