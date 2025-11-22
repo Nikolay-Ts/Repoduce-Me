@@ -1,0 +1,4 @@
+/setupEnvironment.zsh
+__pycache__/
+.venv/
+.env
