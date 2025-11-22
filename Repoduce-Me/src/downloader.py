@@ -5,6 +5,9 @@ import time
 import stat
 from typing import Optional
 
+import urllib.request
+from pathlib import Path
+
 class Downloader:
     """
     A utility class to clone a GitHub repository into a local 'tmp' directory.
@@ -97,12 +100,58 @@ class Downloader:
             print("The 'git' command was not found. Please ensure Git is installed and added to your system's PATH.")
             print("------------------------------")
             return False
+        
+    def download_pdf(self, pdf_url: str, output_path: Optional[str] = None) -> bool:
+        """
+        Download a PDF from the given URL and save it locally.
+
+        If `output_path` is not provided, the file is saved under `self.target_dir`
+        using the filename inferred from the URL (or 'downloaded.pdf' as fallback).
+        """
+
+        target_dir_path = Path(self.target_dir)
+        target_dir_path.mkdir(parents=True, exist_ok=True)
+
+        if output_path is None:
+            filename = os.path.basename(pdf_url.split("?", 1)[0])  
+            if not filename.lower().endswith(".pdf") or not filename:
+                filename = "downloaded.pdf"
+
+            output_path = str(target_dir_path / filename)
+
+        print(f"Attempting to download PDF from '{pdf_url}' to '{output_path}'...")
+
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                with urllib.request.urlopen(pdf_url) as response:
+                    if response.status != 200:
+                        raise OSError(f"HTTP status {response.status}")
+
+                    with open(output_path, "wb") as f:
+                        shutil.copyfileobj(response, f)
+
+                print(f"PDF successfully downloaded on attempt {attempt}.")
+                return True
+
+            except Exception as e:
+                if attempt < self.max_retries:
+                    print(
+                        f"Download attempt {attempt} failed: "
+                        f"{type(e).__name__} - {e}. Retrying in {self.retry_delay}s..."
+                    )
+                    time.sleep(self.retry_delay)
+                else:
+                    print(
+                        f"Error downloading PDF after {self.max_retries} attempts: {e}"
+                    )
+                return False
 
 
 if __name__ == "__main__":
     TEST_TARGET_DIR = "tmp_repo" 
     TEST_REPO_LINK = "" 
     TEST_BRANCH = "main" 
+    TEST_PDF_URL = "https://arxiv.org/pdf/2507.06849"
     
     print("--- Downloader Test Start ---")
 
@@ -118,5 +167,7 @@ if __name__ == "__main__":
         downloader.download(TEST_REPO_LINK, branch=TEST_BRANCH)
     else:
         print("\nTest FAILED. Check the error messages above.")
+
+    downloader.download_pdf(TEST_PDF_URL)
 
     print("\n--- Downloader Test Complete ---")
