@@ -3,13 +3,13 @@ import subprocess
 from pathlib import Path
 from typing import List
 import shutil 
-import re
+import os
 
 # Configuration constants (must match main.py)
 TMP_DIR = "tmp"
 VENV_DIR = Path(TMP_DIR) / ".venv_repro"
 REQUIREMENTS_FILE = Path(TMP_DIR) / "requirements.txt"
-
+REQUIREMENTS_FILTERED_FILE = Path(TMP_DIR) / "requirements_filtered.txt"
 
 def get_venv_python_executable(venv_path: Path) -> Path:
     """Determines the path to the venv's Python executable based on the operating system."""
@@ -20,136 +20,115 @@ def get_venv_python_executable(venv_path: Path) -> Path:
         return venv_path / "bin" / "python"
 
 
-def execute_subprocess(command: List[str], error_message: str):
+def execute_subprocess(command: List[str], error_message: str, cwd: str = None):
     """Utility to run a subprocess command with check=True and custom error handling."""
     try:
         # check=True raises CalledProcessError if the command fails
-        result = subprocess.run(command, check=True, capture_output=True, text=True)
+        result = subprocess.run(command, check=True, capture_output=True, text=True, cwd=cwd)
         return result
     except subprocess.CalledProcessError as e:
         print(f"[ERROR] {error_message} (External command failed).", file=sys.stderr)
         # Print the error output for debugging
         print(f"Command: {' '.join(command)}", file=sys.stderr)
         print(f"Stderr:\n{e.stderr}", file=sys.stderr)
-        raise RuntimeError(f"{error_message} failed.") from e
-    except FileNotFoundError as e:
-        print(f"[FATAL] System executable not found (e.g., 'python'): {e}", file=sys.stderr)
-        raise RuntimeError(f"{error_message} failed.") from e
-    except Exception as e:
-        print(f"[ERROR] Unexpected error: {e}", file=sys.stderr)
-        raise RuntimeError(f"{error_message} failed.") from e
+        raise RuntimeError(f"{error_message} failed.")
 
 
-def filter_requirements(requirements_file: Path) -> Path:
+def create_and_install_venv(repo_dir: str, use_repo_install: bool, has_extracted_requirements: bool):
     """
-    Loads the requirements file, filters out problematic dependencies (like 'ast' 
-    which conflicts with the standard library and causes build failures), and 
-    writes the filtered list to a temporary file for installation.
-    
-    Returns the path to the *new* filtered requirements file.
+    Creates a virtual environment and installs dependencies using the most appropriate method:
+    1. If use_repo_install is True (pyproject.toml or setup.py exists), use `pip install .`.
+    2. Otherwise, use `pip install -r requirements.txt`.
     """
-    if not requirements_file.exists():
-        return requirements_file # Nothing to filter
-
-    print("[INFO] Filtering requirements.txt for known problematic packages...")
+    # Clean up the previous filtered file if it exists
+    if REQUIREMENTS_FILTERED_FILE.exists():
+        os.remove(REQUIREMENTS_FILTERED_FILE)
     
-    # 'ast' causes FileNotFoundError during metadata generation.
-    # 'enum34' is a common conflict on newer Python versions.
-    packages_to_skip = {'ast', 'enum34'} 
-    
-    filtered_lines = []
-    
-    try:
-        lines = requirements_file.read_text(encoding='utf-8').splitlines()
-        for line in lines:
-            # Clean up the line to get the package name before any version specifier
-            # Use re.split to handle various separators (=, >, <, ~)
-            package_name_parts = re.split(r'[=><~]', line.strip())
-            package_name = package_name_parts[0].strip() if package_name_parts else ''
-            
-            # Skip comments and empty lines
-            if not package_name or package_name.startswith('#'):
-                continue
-            
-            if package_name not in packages_to_skip:
-                filtered_lines.append(line)
-                
-    except Exception as e:
-        print(f"[WARNING] Could not read or filter requirements file: {e}. Using original file.", file=sys.stderr)
-        return requirements_file
+    # We copy REQUIREMENTS_FILE to REQUIREMENTS_FILTERED_FILE just for consistent logging 
+    # if it was created by the extractor.
+    if REQUIREMENTS_FILE.exists() and has_extracted_requirements:
+        shutil.copy(REQUIREMENTS_FILE, REQUIREMENTS_FILTERED_FILE) 
 
-    # Write filtered content to a new temporary file
-    filtered_file = requirements_file.parent / "requirements_filtered.txt"
-    try:
-        filtered_file.write_text('\n'.join(filtered_lines), encoding='utf-8')
-        print(f"[SUCCESS] Filtered dependencies written to: {filtered_file.name}")
-        return filtered_file
-    except Exception as e:
-        print(f"[ERROR] Could not write filtered requirements file: {e}. Using original file.", file=sys.stderr)
-        return requirements_file
-
-
-def create_and_install_venv(repo_path: Path):
-    """
-    Creates a new virtual environment, upgrades core tools, and installs 
-    dependencies from the pre-generated requirements.txt.
-    """
-    print(f"\n--- STEP 5: Setting up Virtual Environment in {VENV_DIR.name}... ---")
-    
-    # --- 5a. Create the Virtual Environment ---
-    if VENV_DIR.exists():
-        print(f"[INFO] Cleaning up existing Venv directory: {VENV_DIR.name}...")
-        try:
-            shutil.rmtree(VENV_DIR)
-            print("[INFO] Venv directory cleaned.")
-        except Exception as e:
-            print(f"[WARNING] Could not remove Venv directory {VENV_DIR.name}: {e}")
-            
     print(f"[INFO] Creating virtual environment at {VENV_DIR}...")
-    execute_subprocess(
-        [sys.executable, '-m', 'venv', str(VENV_DIR)],
-        "Virtual environment creation"
-    )
+    execute_subprocess([sys.executable, '-m', 'venv', str(VENV_DIR)], "Virtual environment creation")
     print("[SUCCESS] Virtual environment created.")
     
     python_executable = get_venv_python_executable(VENV_DIR)
 
-    # CRITICAL FIX STEP: Pre-install enum34 to satisfy broken build dependencies that look for '__version__'
-    # This must run before upgrading pip/setuptools in case the base venv tools are also affected.
-
-    # --- 5b. Upgrade Core Build Tools (Crucial fix for 'enum' error) ---
+    # --- 5a. Upgrade Core Build Tools ---
     print("[INFO] Upgrading pip, setuptools, and wheel in the virtual environment...")
     execute_subprocess(
         [str(python_executable), '-m', 'pip', 'install', '--upgrade', 'pip', 'setuptools', 'wheel'],
         "Upgrade of core build tools"
     )
     print("[SUCCESS] Core build tools upgraded.")
-    
-    # Check if the original requirements file exists and is not empty
-    if not REQUIREMENTS_FILE.exists() or REQUIREMENTS_FILE.stat().st_size == 0:
-        print(f"[WARNING] Requirements file not found or is empty at {REQUIREMENTS_FILE.name}. Skipping dependency installation.")
-        return
 
-    # Filter out known problematic packages (like 'ast')
-    requirements_to_install = filter_requirements(REQUIREMENTS_FILE)
+    # --- 5b. Pre-installing Critical Build Dependencies (Cython, numpy, scipy) ---
+    # This step is crucial for scientific packages that need these installed before compilation.
+    packages_to_preinstall = ['Cython', 'numpy', 'scipy']
+    print(f"[INFO] Pre-installing critical build dependencies: {', '.join(packages_to_preinstall)}...")
+    
+    # Prioritize numpy and scipy first if they are on the list
+    for package in ['numpy', 'scipy', 'Cython']:
+        if package in packages_to_preinstall:
+            try:
+                execute_subprocess(
+                    [str(python_executable), '-m', 'pip', 'install', package],
+                    f"Pre-installation of {package}"
+                )
+                print(f"[SUCCESS] '{package}' pre-installed.")
+                packages_to_preinstall.remove(package)
+            except Exception as e:
+                # Log warning and continue to main installation
+                print(f"[WARNING] Failed to pre-install {package}: {e}. Proceeding with main installation.", file=sys.stderr)
+
+    # --- 5c. Main Dependency Installation ---
+    install_command: List[str]
+    repo_path = Path(repo_dir)
+
+    if use_repo_install:
+        # Strategy 1: Use pip install . on the repository directory
+        print(f"[INFO] Installing dependencies using 'pip install .' from {repo_path}...")
         
-    print(f"[INFO] Installing dependencies from {requirements_to_install.name} into Venv...")
-    
-    # Use a robust installation command
-    install_command = [
-        str(python_executable), 
-        '-m', 
-        'pip', 
-        'install', 
-        '--no-cache-dir', 
-        '-r', 
-        str(requirements_to_install), # <-- Use the filtered file path here
-        '--no-build-isolation'
-    ]
+        # We need to run the command from the repo directory (cwd=repo_dir)
+        install_command = [
+            str(python_executable), 
+            '-m', 
+            'pip', 
+            'install', 
+            '--no-cache-dir', 
+            str(repo_path),
+            '--no-build-isolation'
+        ]
+        
+        execute_subprocess(
+            install_command, 
+            "Final dependency installation (pip install .)",
+            # Crucially, run the installation from the cloned repo directory
+            cwd=str(repo_path) 
+        )
 
-    execute_subprocess(
-        install_command,
-        "Final dependency installation"
-    )
-    
-    print("[SUCCESS] All dependencies installed.")
+    elif has_extracted_requirements and REQUIREMENTS_FILTERED_FILE.exists() and REQUIREMENTS_FILTERED_FILE.stat().st_size > 0:
+        # Strategy 2: Use pip install -r requirements.txt (either existing or dynamically generated)
+        print(f"[INFO] Installing dependencies from {REQUIREMENTS_FILTERED_FILE.name} into Venv...")
+        
+        install_command = [
+            str(python_executable), 
+            '-m', 
+            'pip', 
+            'install', 
+            '--no-cache-dir', 
+            '-r', 
+            str(REQUIREMENTS_FILTERED_FILE),
+            '--no-build-isolation',
+        ]
+        
+        execute_subprocess(
+            install_command, 
+            "Final dependency installation (requirements file)"
+        )
+    else:
+        print("[WARNING] Skipping main dependency installation: No project file (pyproject.toml/setup.py) found, and extracted requirements list is empty.")
+        return # Skip success message if installation was skipped
+        
+    print("[SUCCESS] All dependencies successfully installed.")
