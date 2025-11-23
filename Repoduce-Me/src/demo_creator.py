@@ -24,7 +24,7 @@ class DemoCreator:
         self.max_readme_chars = max_readme_chars
 
         # Stateless: single-shot code generation
-        self.llm = ConstructorModel()
+        self.llm = ConstructorModel(model="gpt-5.1")
 
     # ---------- Public API ----------
 

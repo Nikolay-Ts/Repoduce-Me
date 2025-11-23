@@ -55,7 +55,7 @@ REPRODUCE_ROOT = Path(__file__).resolve().parents[1]
 ADAPTER_ROOT = REPRODUCE_ROOT / "ConstructorAdapter"
 sys.path.insert(0, str(ADAPTER_ROOT))
 
-from constructor_adapter import StatelessConstructorAdapter  # type: ignore
+from constructor_adapter import StatefulConstructorAdapter  # type: ignore
 
 
 class ConstructorModel:
@@ -72,7 +72,7 @@ class ConstructorModel:
         if model is not None:
             adapter_kwargs["llm_alias"] = model
 
-        self.constructor_adapter = StatelessConstructorAdapter(**adapter_kwargs)
+        self.constructor_adapter = StatefulConstructorAdapter(**adapter_kwargs)
 
         base_url = f"{self.constructor_adapter.api_url}/knowledge-models/{self.constructor_adapter.km_id}"
         llm_alias = self.constructor_adapter.llm_alias

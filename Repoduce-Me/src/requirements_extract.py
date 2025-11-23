@@ -1,7 +1,8 @@
 import re
 import os
 from pathlib import Path
-from typing import Set, Optional, List
+from typing import Set, Optional, List, Dict
+
 
 class RequirementsExtractor:
     """
@@ -88,9 +89,22 @@ class RequirementsExtractor:
         'astropilot', 
     }
 
+    # Directories to skip entirely when walking the repo
+    IGNORE_DIRS: Set[str] = {
+        '.git', '.hg', '.svn',
+        '__pycache__',
+        '.venv', 'venv', 'env',
+        'build', 'dist',
+        'node_modules',
+    }
+
+    # Regex patterns
+    _IMPORT_RE = re.compile(r'^\s*import\s+(.+)')
+    _FROM_RE = re.compile(r'^\s*from\s+([a-zA-Z0-9_.]+)\s+import\s+')
+
     def __init__(self, output_dir: str = "tmp"):
         """
-        Initializes the extractor with the directory where the requirements.txt 
+        Initializes the extractor with the directory where the requirements.txt
         will be written.
         """
         self.output_dir = Path(output_dir)
@@ -131,7 +145,7 @@ class RequirementsExtractor:
         """
         repo_path = Path(repo_path)
         print(f"[INFO] Starting dependency analysis in: {repo_path}")
-        
+
         if not repo_path.is_dir():
             print(f"[ERROR] Repository path not found: {repo_path}")
             return
@@ -141,9 +155,10 @@ class RequirementsExtractor:
             dirs[:] = [d for d in dirs if not d.startswith('.')]
             
             for file_name in files:
-                if file_name.endswith(".py"):
-                    file_path = Path(root) / file_name
-                    self._analyze_file(file_path)
+                if not file_name.endswith(".py"):
+                    continue
+                file_path = Path(root) / file_name
+                self._analyze_file(file_path)
 
         excluded_modules = self.STANDARD_LIBRARY | self.DEBUG_BLACKLIST
         external_dependencies = self.all_dependencies - excluded_modules
@@ -152,9 +167,8 @@ class RequirementsExtractor:
         for dep in external_dependencies:
             install_name = self.IMPORT_TO_INSTALL_NAME.get(dep, dep)
             final_dependencies.add(install_name)
-            
-        sorted_dependencies = sorted(list(final_dependencies))
-        
+
+        sorted_dependencies = sorted(final_dependencies)
         self._write_requirements_file(sorted_dependencies)
 
     def _analyze_file(self, file_path: Path):
@@ -184,16 +198,14 @@ class RequirementsExtractor:
 
     def _write_requirements_file(self, dependencies: List[str]):
         """Writes the collected external dependencies to requirements.txt."""
-        
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        
+
         try:
             with open(self.output_file, 'w') as f:
                 for dep in dependencies:
                     f.write(f"{dep}\n")
-            
+
             print(f"\n[SUCCESS] Extracted {len(dependencies)} external dependencies.")
             print(f"[SUCCESS] Requirements file written to: {self.output_file.resolve()}")
-            
         except Exception as e:
             print(f"[ERROR] Failed to write requirements.txt: {e}")
