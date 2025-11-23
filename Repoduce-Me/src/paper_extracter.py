@@ -42,7 +42,6 @@ class PaperParser:
         response = self.llm.invoke(prompt)
         return getattr(response, "content", str(response))
 
-    
     def extract_github_link(self, paper_filepath: str = "") -> List[str]:
         """Return a list of GitHub links. If no links are found the list is empty."""
         if paper_filepath:
@@ -56,17 +55,34 @@ class PaperParser:
         reader = PdfReader(pdf_path)
 
         github_links: List[str] = []
+        
+        all_lines = []
+        for page in reader.pages:
+            all_lines.extend((page.extract_text() or "").splitlines())
 
+        repaired_lines = []
+        i = 0
+        while i < len(all_lines):
+            current_line = all_lines[i].strip()
+            
+            if (current_line.endswith('/') or current_line.endswith('-')) and i + 1 < len(all_lines):
+                next_line = all_lines[i+1].strip()
+                joined_line = current_line + next_line
+                repaired_lines.append(joined_line)
+                i += 2  
+            else:
+                repaired_lines.append(current_line)
+                i += 1
+
+        continuous_text = " ".join(repaired_lines)
+        
         pattern = re.compile(r"https?://github\.com/[^\s)\"'>]+")
 
-        for page in reader.pages:
-            text = page.extract_text() or ""
-            matches = pattern.findall(text)
+        matches = pattern.findall(continuous_text)
 
-            for m in matches:
-                clean = m.rstrip('.,);:\'"')
-                github_links.append(clean)
-
+        for m in matches:
+            clean = m.rstrip('.,);:\'"')
+            github_links.append(clean)
         seen = set()
         unique_links: List[str] = []
         for link in github_links:

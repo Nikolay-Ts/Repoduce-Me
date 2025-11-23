@@ -25,7 +25,7 @@ PAPER_URLS: List[str] = [
     "https://arxiv.org/pdf/2207.12274",
     "https://genomebiology.biomedcentral.com/counter/pdf/10.1186/s13059-017-1382-0.pdf",
     "https://arxiv.org/pdf/2406.07817",
-    "https://joss.theoj.org/papers/10.21105/joss.07975",
+    "https://www.theoj.org/joss-papers/joss.07975/10.21105.joss.07975.pdf",
     "https://arxiv.org/pdf/2103.16196v2",
     "https://arxiv.org/pdf/2307.08234v2",
     "https://arxiv.org/pdf/2507.06825",
@@ -179,7 +179,7 @@ def run_main_for_url(url: str, index: int) -> Dict[str, Any]:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = LOG_DIR / f"log_{index:03d}.txt"
 
-    cmd = [sys.executable, str(MAIN_SCRIPT), url, "--tmp"]
+    cmd = [sys.executable, str(MAIN_SCRIPT), url, "--tmp", "--cleanup-all"]
     print(f"\n=== [{index:03d}] Running main.py for URL ===")
     print(f"URL: {url}")
     print(f"CMD: {' '.join(cmd)}")
