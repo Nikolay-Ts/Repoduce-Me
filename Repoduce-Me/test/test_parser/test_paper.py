@@ -12,4 +12,4 @@ print(meow.extract_github_link())
 meow = PaperParser(str(ROOT / "test/paper2.pdf"))
 print(meow.extract_github_link())
 
-print(meow.extract_github_link(str(ROOT / "test/paper3.pdf")))
+print(meow.extract_github_link(str(ROOT / "test/paper4.pdf")))
