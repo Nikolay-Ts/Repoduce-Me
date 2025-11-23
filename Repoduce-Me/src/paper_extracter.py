@@ -32,6 +32,10 @@ class PaperParser:
 
 
     def _search_web(self, paper_name: str) -> str:
+        """
+        Query LLM to search for GitHub repo based on paper title.
+        Returns raw LLM response (should be JSON-like).
+        """
         prompt = (
             "You are a very good researcher. "
             f"Based on this paper name '{paper_name}', search GitHub "
@@ -43,7 +47,11 @@ class PaperParser:
         return getattr(response, "content", str(response))
 
     def extract_github_link(self, paper_filepath: str = "") -> List[str]:
-        """Return a list of GitHub links. If no links are found the list is empty."""
+        """
+        Return a list of GitHub links. If no links are found the list is empty.
+        
+        IMPORTANT: Always returns a List[str], never a single string.
+        """
         if paper_filepath:
             self.paper_filepath = paper_filepath
 
@@ -56,10 +64,12 @@ class PaperParser:
 
         github_links: List[str] = []
         
+        # Combine all lines from all pages
         all_lines = []
         for page in reader.pages:
             all_lines.extend((page.extract_text() or "").splitlines())
 
+        # Repair broken URLs across lines
         repaired_lines = []
         i = 0
         while i < len(all_lines):
@@ -76,13 +86,17 @@ class PaperParser:
 
         continuous_text = " ".join(repaired_lines)
         
+        # Extract GitHub URLs
         pattern = re.compile(r"https?://github\.com/[^\s)\"'>]+")
-
         matches = pattern.findall(continuous_text)
 
         for m in matches:
             clean = m.rstrip('.,);:\'"')
+            # Sanitize: remove /tree/, /blob/, /issues/, etc. to get root repo
+            clean = re.sub(r'/(tree|blob|issues|pull|wiki|releases|commit)/.*$', '', clean)
             github_links.append(clean)
+        
+        # Deduplicate while preserving order
         seen = set()
         unique_links: List[str] = []
         for link in github_links:
@@ -90,13 +104,24 @@ class PaperParser:
                 seen.add(link)
                 unique_links.append(link)
 
-        paper_result: dict = {}
+        # If no links found in PDF, try LLM search
         if not unique_links:
             paper_title = self._extract_paper_title(reader)
             if paper_title:
-                paper_result = json.loads(self._search_web(paper_title))
-
-        if paper_result.get('github_link') is not None:
-            unique_links.append(paper_result['github_link'])
+                try:
+                    llm_response = self._search_web(paper_title)
+                    # Try to parse JSON response
+                    paper_result = json.loads(llm_response)
+                    
+                    # Handle various response formats
+                    if isinstance(paper_result, dict):
+                        link = paper_result.get('github_link')
+                        if link and isinstance(link, str):
+                            unique_links.append(link)
+                        elif link and isinstance(link, list) and link:
+                            unique_links.extend([l for l in link if isinstance(l, str)])
+                    
+                except (json.JSONDecodeError, KeyError, TypeError) as e:
+                    print(f"[WARNING] Could not parse LLM response for GitHub link: {e}")
 
         return unique_links

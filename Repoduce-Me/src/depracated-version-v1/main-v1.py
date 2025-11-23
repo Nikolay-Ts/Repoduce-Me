@@ -8,6 +8,8 @@ from typing import Optional, List
 import shutil 
 
 # Configuration
+# Define the temporary directory where files will be processed and repositories cloned.
+# This path is used by the Downloader class's __init__ method by default.
 TMP_DIR = "tmp"
 PDF_OUTPUT_FILENAME = Path(TMP_DIR) / "downloaded_paper.pdf"
 VENV_DIR = Path(TMP_DIR) / ".venv_repro"
@@ -32,6 +34,7 @@ def execute_subprocess(command: List[str], error_message: str, cwd: Optional[str
         return result
     except subprocess.CalledProcessError as e:
         print(f"[ERROR] {error_message} (External command failed).", file=sys.stderr)
+        # Print the error output for debugging
         print(f"Command: {' '.join(command)}", file=sys.stderr)
         print(f"Stderr:\n{e.stderr}", file=sys.stderr)
         raise RuntimeError(f"{error_message} failed.") from e
@@ -42,29 +45,26 @@ def execute_subprocess(command: List[str], error_message: str, cwd: Optional[str
         print(f"[ERROR] Unexpected error: {e}", file=sys.stderr)
         raise RuntimeError(f"{error_message} failed.") from e
 
-def get_installed_packages(venv_python: Path) -> set[str]:
+def create_demo_from_readme(repo_path: Path):
     """
-    Query the venv to get a list of installed package names.
-    Returns a set of lowercase package names.
+    Step 4: Call Constructor to generate a demo script from the cloned repo.
     """
-    try:
-        result = subprocess.run(
-            [str(venv_python), "-m", "pip", "list", "--format=freeze"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-        packages = set()
-        for line in result.stdout.splitlines():
-            # Format is "package==version" or "package @ location"
-            pkg_name = line.split("==")[0].split("@")[0].strip().lower()
-            if pkg_name:
-                packages.add(pkg_name)
-        return packages
-    except Exception as e:
-        print(f"[WARNING] Could not query installed packages: {e}")
-        return set()
+    print(f"\n--- STEP 4: Creating Demo from Readme via Constructor LLM... ---")
+
+    if not repo_path or not repo_path.is_dir():
+        print("[WARNING] Skipping demo creation: Repository path is invalid or clone failed.")
+        return
+
+    creator = DemoCreator(repo_path)
+    demo_path = creator.generate_demo()
+
+    if demo_path:
+        print(f"[INFO] Demo script generated at: {demo_path}")
+        print("[INFO] You can now run it with something like:")
+        print(f"       cd {repo_path}")
+        print(f"       python {demo_path.name}")
+    else:
+        print("[WARNING] Demo generation failed or returned empty code.")
 
 def run_pipeline(input_path: str, github_link: str,  istmp: bool, cleanup_tmp: bool, cleanup_workspace: bool, auto_run: bool):
     """
@@ -85,7 +85,7 @@ def run_pipeline(input_path: str, github_link: str,  istmp: bool, cleanup_tmp: b
             else:
                 raise ConnectionError(f"Failed to download PDF from: {input_path}")
         else:
-            print(f"--- STEP 1: Input is a local PDF file. Skipping download... ---\n[INFO] Using local PDF file: {input_path}")
+            print("--- STEP 1: Input is a local PDF file. Skipping download... ---\n[INFO] Using local PDF file: {input_path}")
             pdf_path = Path(input_path)
             if not pdf_path.is_file():
                 raise FileNotFoundError(f"Local file not found at: {pdf_path}")
@@ -110,14 +110,18 @@ def run_pipeline(input_path: str, github_link: str,  istmp: bool, cleanup_tmp: b
 
         # STEP 3: Cloning GitHub Repository
         print("\n--- STEP 3: Cloning GitHub Repository... ---")
+        # Decide where to put the repo
         if istmp:
+            # Ephemeral: tmp/repo
             cloned_repo_path = Path(TMP_DIR) / "repo"
         else:
+            # Persistent: workspace/<repo_name>
             repo_name = _parse_repo_name_from_github_url(github_url)
             cloned_repo_path = Path(WORKSPACE_DIR) / repo_name
             Path(WORKSPACE_DIR).mkdir(parents=True, exist_ok=True)
-        
+        # Make sure parent exists
         cloned_repo_path.parent.mkdir(parents=True, exist_ok=True)
+        # IMPORTANT: use target_path for Downloader
         clone_success = downloader.download(github_url, str(cloned_repo_path))
         if not clone_success:
             raise RuntimeError(f"Git clone failed for repository: {github_url}")
@@ -139,6 +143,7 @@ def run_pipeline(input_path: str, github_link: str,  istmp: bool, cleanup_tmp: b
             has_extracted_requirements = False
 
         else:
+            # Normal requirements case (either existing requirements*.txt or dynamically generated)
             print(f"[SUCCESS] requirements.txt generated with {len(deps)} dependencies at {REQUIREMENTS_FILE}")
             use_repo_install = False
             has_extracted_requirements = bool(deps)
@@ -151,9 +156,10 @@ def run_pipeline(input_path: str, github_link: str,  istmp: bool, cleanup_tmp: b
             else:
                 alt_req_path = cloned_repo_path / "requirements.generated.txt"
                 shutil.copy(REQUIREMENTS_FILE, alt_req_path)
-                print(f"[INFO] Repo already had requirements.txt, wrote generated deps to {alt_req_path}")
+                print(
+                    f"[INFO] Repo already had requirements.txt, wrote generated deps to {alt_req_path}"
+                )
 
-        # STEP 5: Virtual Environment Setup
         print(f"\n--- STEP 5: Setting up Virtual Environment in {VENV_DIR.name}... ---")
         create_and_install_venv(
             repo_dir=str(cloned_repo_path),
@@ -163,18 +169,7 @@ def run_pipeline(input_path: str, github_link: str,  istmp: bool, cleanup_tmp: b
 
         # STEP 6: Demo Creation
         print("\n--- STEP 6: Creating Demo from Readme via Constructor LLM... ---")
-        
-        # Get list of installed packages to pass to demo creator
-        venv_python = get_venv_python_executable(VENV_DIR)
-        installed_packages = get_installed_packages(venv_python)
-        
-        if installed_packages:
-            print(f"[INFO] Detected {len(installed_packages)} installed packages in venv")
-        
-        creator = DemoCreator(
-            cloned_repo_path, 
-            installed_packages=installed_packages  # Pass this info
-        )
+        creator = DemoCreator(cloned_repo_path)
         demo_path = creator.generate_demo()
 
         if demo_path:
@@ -188,42 +183,16 @@ def run_pipeline(input_path: str, github_link: str,  istmp: bool, cleanup_tmp: b
         # STEP 7: Optional auto_run inside the venv
         if auto_run and demo_path:
             print("\n--- STEP 7: Auto-running generated demo inside virtualenv... ---")
+            venv_python = get_venv_python_executable(VENV_DIR)
             print("[INFO] Running generated_demo.py inside venv...")
-            
-            try:
-                result = subprocess.run(
-                    [str(venv_python), str(demo_path.name)],
-                    cwd=str(cloned_repo_path),
-                    capture_output=True,
-                    text=True,
-                    timeout=120  # 2 minute timeout
-                )
-                
-                if result.returncode == 0:
-                    print("[SUCCESS] Demo executed successfully!")
-                    if result.stdout:
-                        print("\n--- Demo Output ---")
-                        print(result.stdout)
-                        print("--- End Demo Output ---")
-                else:
-                    print(f"[WARNING] Demo execution failed with exit code {result.returncode}")
-                    if result.stderr:
-                        print("\n--- Demo Error Output ---")
-                        print(result.stderr)
-                        print("--- End Demo Error Output ---")
-                    
-                    # Check if it's a missing dependency issue
-                    if "ModuleNotFoundError" in result.stderr or "ImportError" in result.stderr:
-                        print("\n[SUGGESTION] The generated demo requires packages not installed in the venv.")
-                        print("[SUGGESTION] You can manually install missing packages or re-run the pipeline.")
-                        
-            except subprocess.TimeoutExpired:
-                print("[WARNING] Demo execution timed out after 2 minutes")
-            except Exception as e:
-                print(f"[WARNING] Demo execution encountered an error: {e}")
-                
+            execute_subprocess(
+                [str(venv_python), str(demo_path.name)],
+                "running generated demo",
+                cwd=str(cloned_repo_path),
+            )
         elif auto_run and not demo_path:
             print("[WARNING] auto-run was requested, but no demo script was generated.")
+
 
     # --- Error Handling ---
     except FileNotFoundError as e:
@@ -243,12 +212,16 @@ def run_pipeline(input_path: str, github_link: str,  istmp: bool, cleanup_tmp: b
         sys.exit(1)
         
     finally:
+        # The final cleanup block ensures directories are removed if requested
         if cleanup_tmp and Path(TMP_DIR).exists():
             print(f"[INFO] Cleaning up tmp/ directory...")
             shutil.rmtree(TMP_DIR, ignore_errors=True)
         
         if cleanup_workspace and Path(WORKSPACE_DIR).exists():
             print(f"[INFO] Cleaning up workspace/ directory...")
+            # We assume the cleanup_workspace flag means cleaning the entire workspace
+            # or relying on the calling script to manage it if only specific repo cleanup is needed.
+            # For simplicity here, we clear the entire WORKSPACE_DIR if the flag is set.
             shutil.rmtree(WORKSPACE_DIR, ignore_errors=True)
 
 
@@ -293,16 +266,17 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "--auto-run",
-        dest="auto_run",
-        action="store_true",
-        help="Flag to automatically run the generated demo inside the created venv."
+    "--auto-run",
+    dest="auto_run",
+    action="store_true",
+    help="Flag to automatically run the generated demo inside the created venv."
     )
     
     args = parser.parse_args()
     
     print(f"\n--- Starting Pipeline Execution with Input: {args.input} ---")
     
+    # Start timing
     start_time = time.time()
 
     run_pipeline(
@@ -314,6 +288,15 @@ if __name__ == "__main__":
         auto_run=args.auto_run
     )
     
+    # End timing and report duration
     end_time = time.time()
     duration = end_time - start_time
     print(f"\n--- Pipeline Complete in {duration:.2f} seconds. ---")
+    
+    # Example of how to run this script from the command line:
+    # python main.py "http://example.com/paper.pdf"
+    # python main.py "./local_paper.pdf"
+    
+    # Example of how to run this script from the command line:
+    # python main.py "http://example.com/paper.pdf"
+    # python main.py "./local_paper.pdf"
