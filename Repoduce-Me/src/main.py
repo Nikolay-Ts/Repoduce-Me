@@ -74,6 +74,8 @@ def run_pipeline(input_path: str, github_link: str,  istmp: bool, cleanup_tmp: b
     pdf_path: Optional[Path] = None
     
     # Ensure the TMP_DIR exists before starting operations
+    
+    # Ensure the TMP_DIR exists before starting operations
     Path(TMP_DIR).mkdir(exist_ok=True) 
 
     try:
@@ -85,6 +87,7 @@ def run_pipeline(input_path: str, github_link: str,  istmp: bool, cleanup_tmp: b
             else:
                 raise ConnectionError(f"Failed to download PDF from: {input_path}")
         else:
+            print("--- STEP 1: Input is a local PDF file. Skipping download... ---\n[INFO] Using local PDF file: {input_path}")
             print("--- STEP 1: Input is a local PDF file. Skipping download... ---\n[INFO] Using local PDF file: {input_path}")
             pdf_path = Path(input_path)
             if not pdf_path.is_file():
@@ -202,6 +205,7 @@ def run_pipeline(input_path: str, github_link: str,  istmp: bool, cleanup_tmp: b
         sys.exit(1)
     except RuntimeError as e:
         print(f"[ERROR] Command execution failed (e.g., git, venv, or pipreqs): {e}", file=sys.stderr)
+        print(f"[ERROR] Command execution failed (e.g., git, venv, or pipreqs): {e}", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
         print(f"[FATAL] An unexpected error occurred: {type(e).__name__} - {e}", file=sys.stderr)
@@ -270,7 +274,7 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
-    print(f"\n--- Starting Pipeline Execution with Input: {args.input} ---\n")
+    print(f"\n--- Starting Pipeline Execution with Input: {args.input} ---")
     
     # Start timing
     start_time = time.time()
@@ -288,6 +292,10 @@ if __name__ == "__main__":
     end_time = time.time()
     duration = end_time - start_time
     print(f"\n--- Pipeline Complete in {duration:.2f} seconds. ---")
+    
+    # Example of how to run this script from the command line:
+    # python main.py "http://example.com/paper.pdf"
+    # python main.py "./local_paper.pdf"
     
     # Example of how to run this script from the command line:
     # python main.py "http://example.com/paper.pdf"
