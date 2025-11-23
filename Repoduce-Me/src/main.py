@@ -17,6 +17,7 @@ REQUIREMENTS_FILE = Path(TMP_DIR) / "requirements.txt"
 
 from downloader import Downloader
 from paper_extracter import PaperParser
+from demo_creator import DemoCreator
 
 def get_venv_python_executable(venv_path: Path) -> Path:
     """Determines the path to the venv's Python executable based on the operating system."""
@@ -145,7 +146,7 @@ def create_demo_from_readme(repo_path: Path):
         print("[WARNING] Skipping demo creation: Repository path is invalid or clone failed.")
         return
 
-    creator = DemoCreator(repo_path)
+    creator = DemoCreator.generate_demo(repo_path)
     demo_path = creator.generate_demo()
 
     if demo_path:
@@ -211,7 +212,7 @@ def run_pipeline(input_path: str):
         create_and_install_venv(cloned_repo_path)
 
         # STEP 6: Demo Creation
-        create_demo_from_readme(cloned_repo_path)
+        DemoCreator.generate_demo(cloned_repo_path)
 
     # --- Error Handling ---
     except FileNotFoundError as e:
