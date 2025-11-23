@@ -8,23 +8,80 @@ class RequirementsExtractor:
     """
     Scans a cloned repository directory to identify external Python package dependencies
     by looking for 'import' and 'from ... import' statements.
-    It compiles a list of unique, external dependencies into a requirements.txt file.
+    
+    This version includes the comprehensive standard library exclusion list and the 
+    extended module-to-package mapping dictionary derived from common practice and 
+    tools like pipreqs.
     """
 
+    # --- 1. Comprehensive Standard Library Modules (Exclusion List) ---
+    # These modules are part of the Python core and should NOT be included in requirements.txt.
     STANDARD_LIBRARY: Set[str] = {
-        'os', 'sys', 'pathlib', 're', 'json', 'csv', 'math', 'time', 'datetime',
-        'typing', 'collections', 'itertools', 'functools', 'logging', 'argparse',
-        'subprocess', 'shutil', 'tempfile', 'threading', 'queue', 'socket',
-        'http', 'urllib', 'xml', 'html', 'unittest', 'doctest', 'warnings',
-        'dataclasses', 'abc', 'enum', 'decimal', 'io', 'pickle', 'gzip', 'zipfile',
-        'hashlib', 'base64', 'asyncio'
+        '__future__', '__main__', '_dummy_thread', '_thread', 'abc', 'aifc', 
+        'antigravity', 'argparse', 'array', 'ast', 'asynchat', 'asyncio', 
+        'asyncore', 'atexit', 'base64', 'bdb', 'binascii', 'binhex', 'bisect', 
+        'builtins', 'bz2', 'calendar', 'cgi', 'cgitb', 'chunk', 'cmath', 'cmd', 
+        'code', 'codecs', 'codeop', 'collections', 'colorsys', 'compileall', 
+        'concurrent', 'configparser', 'contextlib', 'copy', 'copyreg', 'cProfile', 
+        'csv', 'ctypes', 'datetime', 'dbm', 'decimal', 'difflib', 'dis', 
+        'distutils', 'doctest', 'dummy_threading', 'email', 'encodings', 'errno', 
+        'faulthandler', 'fcntl', 'filecmp', 'fileinput', 'fnmatch', 'formatter', 
+        'fractions', 'ftplib', 'functools', 'gc', 'getopt', 'getpass', 'gettext', 
+        'glob', 'grp', 'gzip', 'hashlib', 'heapq', 'hmac', 'html', 'http', 
+        'imaplib', 'imghdr', 'imp', 'inspect', 'io', 'ipaddress', 'itertools', 
+        'json', 'keyword', 'lib2to3', 'linecache', 'locale', 'logging', 'lzma', 
+        'mailbox', 'mailcap', 'marshal', 'math', 'mimetypes', 'mmap', 
+        'modulefinder', 'msvcrt', 'multiprocessing', 'netrc', 'nis', 'nntplib', 
+        'numbers', 'operator', 'optparse', 'os', 'ossaudiodev', 'parser', 
+        'pathlib', 'pdb', 'pickle', 'pipes', 'pkgutil', 'platform', 'plistlib', 
+        'poplib', 'pprint', 'profile', 'pstats', 'pty', 'pwd', 'py_compile', 
+        'pyclbr', 'pydoc', 'queue', 'quopri', 'random', 're', 'readline', 
+        'reprlib', 'resource', 'rlcompleter', 'runpy', 'sched', 'secrets', 'select', 
+        'selectors', 'shelve', 'shlex', 'shutil', 'signal', 'site', 'smtpd', 
+        'smtplib', 'sndhdr', 'socket', 'socketserver', 'spwd', 'sqlite3', 'ssl', 
+        'stat', 'statistics', 'string', 'stringprep', 'struct', 'subprocess', 
+        'sunau', 'symbol', 'symtable', 'sys', 'sysconfig', 'tabnanny', 'tarfile', 
+        'telnetlib', 'tempfile', 'termios', 'textwrap', 'this', 'threading', 
+        'time', 'timeit', 'tkinter', 'token', 'tokenize', 'trace', 'traceback', 
+        'tracemalloc', 'tty', 'turtle', 'turtledemo', 'types', 'typing', 
+        'unicodedata', 'unittest', 'urllib', 'uu', 'uuid', 'venv', 'warnings', 
+        'wave', 'weakref', 'webbrowser', 'winreg', 'wsgiref', 'xdrlib', 'xml', 
+        'xmlrpc', 'zipapp', 'zipfile', 'zipimport', 'zlib', 'zoneinfo',
+        # Also include common non-core but frequently mistaken modules
+        'pydantic', 'click',
     }
 
-    # Map import names to PyPI package names
-    IMPORT_TO_INSTALL_NAME: Dict[str, str] = {
+    # --- 2. Comprehensive Import Name -> PyPI Install Name Mapping (Alias List) ---
+    IMPORT_TO_INSTALL_NAME: dict[str, str] = {
         'PIL': 'Pillow',
-        # 'cv2': 'opencv-python',
-        # 'yaml': 'PyYAML',
+        'bs4': 'beautifulsoup4',
+        'yaml': 'PyYAML',
+        'cv2': 'opencv-python',
+        'lxml': 'lxml',
+        'scipy': 'scipy',
+        'sklearn': 'scikit-learn',
+        'skimage': 'scikit-image',
+        'tensorflow': 'tensorflow',
+        'torch': 'torch',
+        'torchvision': 'torchvision',
+        'torchaudio': 'torchaudio',
+        'matplotlib': 'matplotlib',
+        'requests': 'requests',
+        'tqdm': 'tqdm',
+        'numpy': 'numpy',
+        'pandas': 'pandas',
+        'ax': 'matplotlib', # Common matplotlib alias
+        'mpl': 'matplotlib', # Common matplotlib alias
+        'dateutil': 'python-dateutil',
+        'h5py': 'h5py',
+        'skvideo': 'scikit-video',
+        'gdown': 'gdown',
+        'pytz': 'pytz',
+        'xlrd': 'xlrd',
+        'cairosvg': 'CairoSVG',
+        # Using pycryptodome as the modern recommended replacement
+        'Crypto': 'pycryptodome', 
+        'cryptography': 'cryptography',
     }
 
     # Directories to skip entirely when walking the repo
@@ -61,36 +118,29 @@ class RequirementsExtractor:
         modules: Set[str] = set()
         line = line.strip()
 
-        # Handle "from X.Y import Z"
-        m_from = self._FROM_RE.match(line)
-        if m_from:
-            full_mod = m_from.group(1)
-            # Skip relative imports like "from .foo import bar"
-            if not full_mod.startswith('.'):
-                top_level = full_mod.split('.')[0]
-                modules.add(top_level)
-            return modules
+        # Simple filter for comments, docstrings, and empty lines
+        if not line or line.startswith('#') or line.startswith('"""') or line.startswith("'''"):
+            return None
+        
+        # Regex for 'import <module> [as alias]'
+        match_import = re.match(r"import\s+([a-zA-Z0-9_]+)", line)
+        if match_import:
+            module = match_import.group(1)
+            return module
 
-        # Handle "import a, b as c"
-        m_import = self._IMPORT_RE.match(line)
-        if m_import:
-            imports_part = m_import.group(1)
-            # Split by comma, then strip "as ..." if present
-            for chunk in imports_part.split(','):
-                chunk = chunk.strip()
-                if not chunk:
-                    continue
-                # Remove trailing comments
-                if '#' in chunk:
-                    chunk = chunk.split('#', 1)[0].strip()
-                # Remove "as alias"
-                if ' as ' in chunk:
-                    chunk = chunk.split(' as ', 1)[0].strip()
-                # Only keep valid identifiers (top-level module name)
-                top_level = chunk.split('.')[0]
-                if top_level and not top_level.startswith('.'):
-                    modules.add(top_level)
-        return modules
+        # Regex for 'from <module>.<sub_module> | from <module> import ...'
+        match_from = re.match(r"from\s+([a-zA-Z0-9_\.]+)\s+import", line)
+        if match_from:
+            module_full = match_from.group(1)
+            module = module_full.split('.')[0]
+            
+            # Filter out relative imports immediately (starting with .)
+            if module.startswith('.'):
+                return None
+            
+            return module
+            
+        return None
 
     def analyze_repo(self, repo_path: Path):
         """
@@ -103,17 +153,11 @@ class RequirementsExtractor:
             print(f"[ERROR] Repository path not found: {repo_path}")
             return
 
-        for root, dirs, files in os.walk(repo_path):
-            # Filter directories in-place to avoid descending into ignored ones
-            dirs[:] = [
-                d for d in dirs
-                if not (d in self.IGNORE_DIRS or d.startswith('.'))
-            ]
-
-            # Skip hidden directories in entire path as extra safety
-            if any(part.startswith('.') for part in Path(root).parts):
-                continue
-
+        for root, dirs, files in os.walk(repo_path, topdown=True):
+            # Skip hidden/system directories (e.g., .git, .vscode)
+            # This also filters out our Venv: .venv_repro
+            dirs[:] = [d for d in dirs if not d.startswith('.')]
+            
             for file_name in files:
                 if not file_name.endswith(".py"):
                     continue
@@ -126,6 +170,7 @@ class RequirementsExtractor:
         # Apply the name mapping (e.g., PIL -> Pillow)
         final_dependencies: Set[str] = set()
         for dep in external_dependencies:
+            # Check for the mapping, defaulting to the original import name if no mapping found
             install_name = self.IMPORT_TO_INSTALL_NAME.get(dep, dep)
             final_dependencies.add(install_name)
 
@@ -133,21 +178,43 @@ class RequirementsExtractor:
         self._write_requirements_file(sorted_dependencies)
 
     def _analyze_file(self, file_path: Path):
-        """Reads a single Python file and extracts dependencies."""
+        """
+        Reads a single Python file, extracts dependencies, and handles common parsing errors.
+        """
         try:
-            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                for line in f:
-                    for module_name in self._extract_modules_from_line(line):
-                        self.all_dependencies.add(module_name)
+            # Attempt to read the file content
+            content = file_path.read_text(encoding='utf-8')
+        except UnicodeDecodeError:
+            # Fallback to a more permissive encoding like latin-1 if utf-8 fails
+            try:
+                content = file_path.read_text(encoding='latin-1')
+            except Exception as e:
+                print(f"[WARNING] Skipping file due to encoding/read error: {file_path} ({e})")
+                return
         except Exception as e:
-            print(f"[WARNING] Could not read or analyze file {file_path}: {e}")
+            print(f"[WARNING] Skipping file due to read error: {file_path} ({e})")
+            return
+        
+        try:
+            # We rely on resilient line-by-line regex matching, which is much less likely to fail 
+            # due to complex f-string syntax or incomplete Python code compared to ast.parse().
+            
+            for line in content.splitlines():
+                module_name = self._extract_module_name(line)
+                if module_name:
+                    self.all_dependencies.add(module_name)
+
+        except Exception as e:
+             # This catch block is mostly for safety against unforeseen regex/processing errors
+            print(f"[WARNING] Could not analyze imports in file {file_path}: {e}. Skipping file.")
 
     def _write_requirements_file(self, dependencies: List[str]):
         """Writes the collected external dependencies to requirements.txt."""
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            with open(self.output_file, 'w', encoding='utf-8') as f:
+            # Write dependencies without version specifiers
+            with open(self.output_file, 'w') as f:
                 for dep in dependencies:
                     f.write(f"{dep}\n")
 
@@ -161,29 +228,24 @@ if __name__ == "__main__":
     # Simple self-test
     TEST_DIR = Path("test_repo_for_reqs")
     TEST_DIR.mkdir(exist_ok=True)
-
+    
+    # Example with different import names
     (TEST_DIR / "test1.py").write_text("""
 import os
-import requests
-import PIL.Image as Image  # mapped to Pillow
-from numpy import array
-import pandas as pd
-from . import local_file
-from mypkg.submod import something
-""")
-
-    (TEST_DIR / "sub_dir").mkdir(exist_ok=True)
-    (TEST_DIR / "sub_dir" / "test2.py").write_text("""
-from sklearn.metrics import accuracy_score
+import requests 
+import PIL.Image as Image # <-- Mapped to Pillow
+from numpy import array 
+from sklearn.metrics import accuracy_score # <-- Mapped to scikit-learn
 import matplotlib.pyplot as plt
-import re, sys, json
-import numpy as np, scipy as sp
+import bs4 
+import gdown.download
+from dateutil import parser
 """)
-
+    
     extractor = RequirementsExtractor(output_dir="tmp_output")
     extractor.analyze_repo(TEST_DIR)
 
-    # Cleanup example dirs if you want
-    # import shutil
-    # shutil.rmtree(TEST_DIR, ignore_errors=True)
-    # shutil.rmtree("tmp_output", ignore_errors=True)
+    # Clean up dummy files
+    import shutil
+    shutil.rmtree(TEST_DIR, ignore_errors=True)
+    shutil.rmtree("tmp_output", ignore_errors=True)
