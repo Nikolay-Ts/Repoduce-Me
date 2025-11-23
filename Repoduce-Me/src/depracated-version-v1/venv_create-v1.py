@@ -43,7 +43,8 @@ def _normalize_requirement_line(raw: str) -> str | None:
     Normalize problematic requirement specs for compatibility with the current Python.
 
     - Strip CUDA suffixes like '+cu121'
-    - Relax numpy, scipy, torch pins (let pip pick a compatible version)
+    - Relax numpy pins (let pip pick a compatible version)
+    - Relax torch pins (and strip CUDA suffixes)
     - Ignore nested '-r otherfile.txt' includes
     """
     line = raw.strip()
@@ -62,26 +63,15 @@ def _normalize_requirement_line(raw: str) -> str | None:
     m = re.match(r"^\s*([A-Za-z0-9_\-]+)", line)
     name = m.group(1).lower() if m else ""
 
-    # Unpin packages that commonly have Python version conflicts
     if name == "numpy":
+        # Completely unpin numpy
         print(f"[INFO] Normalizing numpy requirement: '{raw.strip()}' -> 'numpy'")
         return "numpy"
 
-    if name == "scipy":
-        print(f"[INFO] Normalizing scipy requirement: '{raw.strip()}' -> 'scipy'")
-        return "scipy"
-
     if name == "torch":
+        # Completely unpin torch; rely on pip's latest compatible wheel
         print(f"[INFO] Normalizing torch requirement: '{raw.strip()}' -> 'torch'")
         return "torch"
-    
-    if name == "torchvision":
-        print(f"[INFO] Normalizing torchvision requirement: '{raw.strip()}' -> 'torchvision'")
-        return "torchvision"
-    
-    if name == "torchaudio":
-        print(f"[INFO] Normalizing torchaudio requirement: '{raw.strip()}' -> 'torchaudio'")
-        return "torchaudio"
 
     return line
 
@@ -124,31 +114,13 @@ def create_and_install_venv(
     # Clean up the previous filtered file if it exists
     if REQUIREMENTS_FILTERED_FILE.exists():
         os.remove(REQUIREMENTS_FILTERED_FILE)
-    
     print(f"[INFO] Creating virtual environment at {VENV_DIR} using {BASE_PYTHON}...")
-    
-    # Check Python version compatibility
-    import sys as system_sys
-    py_version = system_sys.version_info
-    if py_version >= (3, 12):
-        print(f"[WARNING] Using Python {py_version.major}.{py_version.minor} - some old packages may not install.")
-        print(f"[WARNING] Consider using Python 3.11 or earlier for better compatibility.")
-    
     execute_subprocess(
         [BASE_PYTHON, "-m", "venv", str(VENV_DIR)],
         "Virtual environment creation",
     )
     
-    # CRITICAL: Get ABSOLUTE path to venv Python to avoid path resolution issues
-    python_executable = get_venv_python_executable(VENV_DIR).resolve()
-    
-    # Verify venv Python is working
-    result = subprocess.run(
-        [str(python_executable), "--version"],
-        capture_output=True,
-        text=True,
-    )
-    print(f"[INFO] Virtual environment Python: {result.stdout.strip()}")
+    python_executable = get_venv_python_executable(VENV_DIR)
 
     # --- 5a. Upgrade Core Build Tools ---
     print("[INFO] Upgrading pip, setuptools, and wheel in the virtual environment...")
@@ -159,9 +131,11 @@ def create_and_install_venv(
     print("[SUCCESS] Core build tools upgraded.")
 
     # --- 5b. Pre-installing Critical Build Dependencies (numpy, scipy) ---
+    # This step is crucial for scientific packages that need these installed before compilation.
     packages_to_preinstall = ['numpy', 'scipy']
     print(f"[INFO] Pre-installing critical build dependencies: {', '.join(packages_to_preinstall)}...")
     
+    # Prioritize numpy and scipy first if they are on the list
     for package in ['numpy', 'scipy']:
         if package in packages_to_preinstall:
             try:
@@ -172,80 +146,33 @@ def create_and_install_venv(
                 print(f"[SUCCESS] '{package}' pre-installed.")
                 packages_to_preinstall.remove(package)
             except Exception as e:
+                # Log warning and continue to main installation
                 print(f"[WARNING] Failed to pre-install {package}: {e}. Proceeding with main installation.", file=sys.stderr)
 
     # --- 5c. Main Dependency Installation ---
-    repo_path = Path(repo_dir).resolve()  # Make absolute
+    install_command: List[str]
+    repo_path = Path(repo_dir)
 
     if use_repo_install:
         # Strategy 1: Use pip install . on the repository directory
         print(f"[INFO] Installing dependencies using 'pip install .' from {repo_path}...")
         
-        # Check if setup.py has a valid version string
-        setup_py = repo_path / "setup.py"
-        if setup_py.exists():
-            try:
-                content = setup_py.read_text(encoding="utf-8")
-                # Look for malformed version strings like '0.0.0-theta'
-                if re.search(r'version\s*=\s*["\'][0-9]+\.[0-9]+\.[0-9]+-[a-z]+["\']', content, re.IGNORECASE):
-                    print(f"[WARNING] Detected potentially invalid version string in setup.py")
-                    print(f"[WARNING] This may cause installation to fail")
-            except Exception:
-                pass  # If we can't read it, just try anyway
-        
-        # CRITICAL FIX: Use "." as the install target, since cwd is already set to repo_path
-        # Also use --no-build-isolation to prevent creating a separate build venv
+        # We need to run the command from the repo directory (cwd=repo_dir)
         install_command = [
             str(python_executable), 
             '-m', 
             'pip', 
-            'install',
-            '--no-cache-dir',
-            '--no-build-isolation',  # Prevent separate build environment
-            '-e',  # Editable install to avoid copying
-            '.',
+            'install', 
+            '--no-cache-dir', 
+            str(repo_path),
         ]
         
-        try:
-            execute_subprocess(
-                install_command, 
-                "Final dependency installation (pip install .)",
-                cwd=str(repo_path)  # Run from inside the repo directory
-            )
-        except RuntimeError as e:
-            # If editable install fails, try regular install
-            print(f"[WARNING] Editable install failed, trying regular install: {e}")
-            install_command = [
-                str(python_executable), 
-                '-m', 
-                'pip', 
-                'install',
-                '--no-cache-dir',
-                '--no-build-isolation',
-                '.',
-            ]
-            try:
-                execute_subprocess(
-                    install_command, 
-                    "Final dependency installation (pip install . fallback)",
-                    cwd=str(repo_path)
-                )
-            except RuntimeError:
-                # Last resort: try without no-build-isolation
-                print(f"[WARNING] Regular install also failed, trying with build isolation...")
-                install_command = [
-                    str(python_executable), 
-                    '-m', 
-                    'pip', 
-                    'install',
-                    '--no-cache-dir',
-                    '.',
-                ]
-                execute_subprocess(
-                    install_command, 
-                    "Final dependency installation (last resort)",
-                    cwd=str(repo_path)
-                )
+        execute_subprocess(
+            install_command, 
+            "Final dependency installation (pip install .)",
+            # Crucially, run the installation from the cloned repo directory
+            cwd=str(repo_path) 
+        )
 
     elif has_extracted_requirements:
         # Strategy 2: Use normalized requirements file
@@ -255,10 +182,6 @@ def create_and_install_venv(
             print(
                 f"[INFO] Installing dependencies from {REQUIREMENTS_FILTERED_FILE.name} into venv..."
             )
-            
-            # Use absolute path for requirements file since we're not changing cwd
-            requirements_absolute = REQUIREMENTS_FILTERED_FILE.resolve()
-            
             install_command = [
                 str(python_executable),
                 "-m",
@@ -266,7 +189,7 @@ def create_and_install_venv(
                 "install",
                 "--no-cache-dir",
                 "-r",
-                str(requirements_absolute),
+                str(REQUIREMENTS_FILTERED_FILE),
             ]
             execute_subprocess(
                 install_command,
@@ -277,5 +200,3 @@ def create_and_install_venv(
                 "[WARNING] Skipping main dependency installation: filtered requirements file is missing or empty."
             )
             return
-    
-    print("[SUCCESS] Virtual environment setup and dependency installation complete.")

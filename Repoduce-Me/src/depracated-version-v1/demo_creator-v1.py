@@ -18,12 +18,10 @@ class DemoCreator:
         repo_path: Path,
         output_filename: str = "generated_demo.py",
         max_readme_chars: int = 8000,
-        installed_packages: Optional[set[str]] = None,
     ) -> None:
         self.repo_path = Path(repo_path).resolve()
         self.output_path = self.repo_path / output_filename
         self.max_readme_chars = max_readme_chars
-        self.installed_packages = installed_packages or set()
 
         # Stateless: single-shot code generation
         self.llm = ConstructorModel(model="gpt-5.1")
@@ -63,6 +61,7 @@ class DemoCreator:
         # 4) Call Constructor LLM via LangChain interface
         print("[INFO] Calling Constructor LLM to generate demo code...")
         try:
+            # ChatOpenAI-style usage: returns a ChatMessage-like object
             response = self.llm.invoke(prompt)
         except Exception as e:
             print(f"[ERROR] LLM invocation failed: {type(e).__name__} - {e}")
@@ -159,31 +158,15 @@ class DemoCreator:
     def _build_prompt(self, readme: str, example_snippets: str) -> str:
         """
         Constructs an instruction for Constructor to output a concrete,
-        end-to-end demo script, with awareness of installed packages.
+        end-to-end demo script, closer in spirit to real workflows.
         """
         repo_name = self.repo_path.name
-
-        # Format installed packages list for the prompt
-        packages_info = ""
-        if self.installed_packages:
-            # Show a sample of installed packages (not all of them to save tokens)
-            sample_packages = sorted(list(self.installed_packages))[:50]
-            packages_info = (
-                "\n\nIMPORTANT - INSTALLED PACKAGES IN VIRTUAL ENVIRONMENT:\n"
-                "The following packages are confirmed to be installed and available for import:\n"
-                f"{', '.join(sample_packages)}"
-                f"{' (and ' + str(len(self.installed_packages) - 50) + ' more)' if len(self.installed_packages) > 50 else ''}\n"
-                "\nYou MUST ONLY import from packages that are listed above or are part of Python's standard library.\n"
-                "Do NOT import packages like 'aiohttp', 'requests', 'httpx', etc. unless they appear in the list above.\n"
-            )
 
         prompt_parts = [
             "You are an AI assistant that generates **runnable Python demo scripts** ",
             "for scientific and simulation code repositories.",
             "",
             f"Repository name: {repo_name}",
-            "",
-            packages_info,  # Include installed packages info
             "",
             "You are given the repository README and (optionally) some example scripts.",
             "",
@@ -193,9 +176,6 @@ class DemoCreator:
             "Requirements for the demo script:",
             "- Output **only valid Python source code**. No markdown, no backticks, no prose.",
             "- The script must be runnable as `python demo.py` after the user installs the repo's dependencies.",
-            "- CRITICAL: Only import packages that are either:",
-            "  1. Part of Python's standard library (os, sys, pathlib, json, etc.)",
-            "  2. Listed in the INSTALLED PACKAGES section above",
             "- Prefer using the public API (importing the installed package) instead of private internals.",
             "- Show a sequence of meaningful steps (e.g., model/set up a system, run a calculation/simulation, ",
             "  compute a couple of properties, and print or save results).",
@@ -218,7 +198,6 @@ class DemoCreator:
             "- Overly long, 300+ line scripts; keep it focused but realistic.",
             "- Copy-pasting whole example files verbatim.",
             "- Relying on external shell scripts or complex job schedulers.",
-            "- Importing packages that are NOT in the installed packages list above.",
             "",
             "README CONTENT START",
             "--------------------",
@@ -240,8 +219,7 @@ class DemoCreator:
         prompt_parts += [
             "",
             "Now generate the final demo Python script.",
-            "Remember: return ONLY Python code, no ``` fences, no explanation text.",
-            "CRITICAL: Only use imports from the INSTALLED PACKAGES list or Python standard library."
+            "Remember: return ONLY Python code, no ``` fences, no explanation text."
         ]
 
         return "\n".join(prompt_parts)
@@ -261,3 +239,4 @@ class DemoCreator:
 
     def _write_demo(self, code: str) -> None:
         self.output_path.write_text(code, encoding="utf-8")
+
