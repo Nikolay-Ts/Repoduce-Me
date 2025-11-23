@@ -139,8 +139,16 @@ def run_pipeline(input_path: str, istmp: bool, cleanup_tmp: bool, cleanup_worksp
 
         # STEP 6: Demo Creation
         print("\n--- STEP 6: Creating Demo from Readme via Constructor LLM... ---")
-        DemoCreator().create_demo(repo_target_path)
-        print("[INFO] Demo creation attempt complete.")
+        creator = DemoCreator(repo_target_path)
+        demo_path = creator.generate_demo()
+
+        if demo_path:
+            print(f"[INFO] Demo script generated at: {demo_path}")
+            print("[INFO] You can now run it with something like:")
+            print(f"       cd {repo_target_path}")
+            print(f"       python {demo_path.name}")
+        else:
+            print("[WARNING] Demo generation failed or returned empty code.")
 
 
     # --- Error Handling ---
@@ -187,6 +195,12 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        "--github",
+        type=str,
+        help="The input of a github link if there is one",
+    )
+
+    parser.add_argument(
         "--tmp",
         action="store_true",
         help="Clone the repository into an ephemeral tmp/repo directory instead of the persistent workspace."
@@ -220,6 +234,7 @@ if __name__ == "__main__":
     run_pipeline(
         args.input,
         istmp=args.tmp,
+        # github=args.github
         cleanup_tmp=args.cleanup_tmp or args.cleanup_all,
         cleanup_workspace=args.cleanup_workspace or args.cleanup_all
     )
