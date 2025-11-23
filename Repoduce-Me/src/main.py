@@ -54,7 +54,7 @@ def _parse_repo_name_from_github_url(github_url: str) -> str:
     return name or "cloned_repo"
 
 
-def run_pipeline(input_path: str, istmp: bool, cleanup_tmp: bool, cleanup_workspace: bool):
+def run_pipeline(input_path: str, github_link: str,  istmp: bool, cleanup_tmp: bool, cleanup_workspace: bool):
     """
     The main orchestration function for the pipeline.
     """
@@ -86,20 +86,26 @@ def run_pipeline(input_path: str, istmp: bool, cleanup_tmp: bool, cleanup_worksp
         # STEP 2: Parse PDF for GitHub Repository URL
         print("\n--- STEP 2: Parsing PDF for GitHub Repository URL... ---")
         parser = PaperParser(str(pdf_path))
-        github_links: list[str] = parser.extract_github_link()
-        
+
         github_url: str
-        if not github_links:
-            # Try to get the GitHub URL from the user-provided input URL itself
-            if "github.com" in input_path.lower():
-                 github_url = input_path
-                 print(f"[INFO] Using input URL as GitHub URL: {github_url}")
+        if github_link is None:
+
+            github_links: list[str] = parser.extract_github_link()
+            
+            
+            if not github_links:
+                # Try to get the GitHub URL from the user-provided input URL itself
+                if "github.com" in input_path.lower():
+                    github_url = input_path
+                    print(f"[INFO] Using input URL as GitHub URL: {github_url}")
+                else:
+                    print("[WARNING] No GitHub link found in the paper. Pipeline stops.")
+                    return
             else:
-                print("[WARNING] No GitHub link found in the paper. Pipeline stops.")
-                return
-        else:
-            github_url = github_links[0]
-            print(f"[SUCCESS] Found GitHub URL: {github_url}")
+                github_url = github_links[0]
+                print(f"[SUCCESS] Found GitHub URL: {github_url}")
+        else: 
+            github_url = github_link 
 
         # Determine the final clone target path based on the flag
         if istmp:
@@ -139,8 +145,16 @@ def run_pipeline(input_path: str, istmp: bool, cleanup_tmp: bool, cleanup_worksp
 
         # STEP 6: Demo Creation
         print("\n--- STEP 6: Creating Demo from Readme via Constructor LLM... ---")
-        DemoCreator().create_demo(repo_target_path)
-        print("[INFO] Demo creation attempt complete.")
+        creator = DemoCreator(repo_target_path)
+        demo_path = creator.generate_demo()
+
+        if demo_path:
+            print(f"[INFO] Demo script generated at: {demo_path}")
+            print("[INFO] You can now run it with something like:")
+            print(f"       cd {repo_target_path}")
+            print(f"       python {demo_path.name}")
+        else:
+            print("[WARNING] Demo generation failed or returned empty code.")
 
 
     # --- Error Handling ---
@@ -187,6 +201,12 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        "--github",
+        type=str,
+        help="The input of a github link if there is one",
+    )
+
+    parser.add_argument(
         "--tmp",
         action="store_true",
         help="Clone the repository into an ephemeral tmp/repo directory instead of the persistent workspace."
@@ -216,9 +236,10 @@ if __name__ == "__main__":
     
     # Start timing
     start_time = time.time()
-    
+
     run_pipeline(
         args.input,
+        github_link=args.github,
         istmp=args.tmp,
         cleanup_tmp=args.cleanup_tmp or args.cleanup_all,
         cleanup_workspace=args.cleanup_workspace or args.cleanup_all
