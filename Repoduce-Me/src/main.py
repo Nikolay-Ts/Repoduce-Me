@@ -1,319 +1,382 @@
-import argparse
+"""
+main.py - Scientific Code Reproducibility Pipeline
+
+This is the main entry point for the Repoduce-Me pipeline that:
+1. Downloads a PDF from URL or uses a local PDF
+2. Parses the PDF to extract GitHub repository URL
+3. Clones the GitHub repository
+4. Extracts and installs dependencies in a virtual environment
+5. Generates a runnable demo script using an LLM
+6. Optionally executes the demo
+"""
+
 import os
 import sys
-import time
+import argparse
+import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional, List
-import shutil 
+from typing import Optional, Set
 
-# Configuration
-TMP_DIR = "tmp"
-PDF_OUTPUT_FILENAME = Path(TMP_DIR) / "downloaded_paper.pdf"
-VENV_DIR = Path(TMP_DIR) / ".venv_repro"
-REQUIREMENTS_FILE = Path(TMP_DIR) / "requirements.txt"
-WORKSPACE_DIR = "workspace"
-
+# Import pipeline components
 from downloader import Downloader
 from paper_extracter import PaperParser
 from requirements_extract import RequirementsExtractor
+from venv_create import setup_venv_and_install, get_venv_python
 from demo_creator import DemoCreator
-from venv_create import create_and_install_venv, get_venv_python_executable
 
-def _parse_repo_name_from_github_url(github_url: str) -> str:
-    name = github_url.rstrip("/").split("/")[-1]
-    if name.lower().endswith(".git"):
-        name = name[:-4]
-    return name or "cloned_repo"
 
-def execute_subprocess(command: List[str], error_message: str, cwd: Optional[str] = None):
-    try:
-        result = subprocess.run(command, check=True, capture_output=True, text=True, cwd=cwd,)
-        return result
-    except subprocess.CalledProcessError as e:
-        print(f"[ERROR] {error_message} (External command failed).", file=sys.stderr)
-        print(f"Command: {' '.join(command)}", file=sys.stderr)
-        print(f"Stderr:\n{e.stderr}", file=sys.stderr)
-        raise RuntimeError(f"{error_message} failed.") from e
-    except FileNotFoundError as e:
-        print(f"[FATAL] System executable not found (e.g., 'python'): {e}", file=sys.stderr)
-        raise RuntimeError(f"{error_message} failed.") from e
-    except Exception as e:
-        print(f"[ERROR] Unexpected error: {e}", file=sys.stderr)
-        raise RuntimeError(f"{error_message} failed.") from e
+# Configuration
+TMP_DIR = "tmp"
+WORKSPACE_DIR = "workspace"
+DEMO_FILENAME = "generated_demo.py"
 
-def get_installed_packages(venv_python: Path) -> set[str]:
+
+def get_installed_packages(venv_python: str) -> Set[str]:
     """
-    Query the venv to get a list of installed package names.
-    Returns a set of lowercase package names.
+    Get a set of installed package names from the virtual environment.
     """
     try:
         result = subprocess.run(
-            [str(venv_python), "-m", "pip", "list", "--format=freeze"],
-            check=True,
+            [venv_python, "-m", "pip", "list", "--format=freeze"],
             capture_output=True,
             text=True,
-            timeout=30
+            timeout=60
         )
-        packages = set()
-        for line in result.stdout.splitlines():
-            # Format is "package==version" or "package @ location"
-            pkg_name = line.split("==")[0].split("@")[0].strip().lower()
-            if pkg_name:
+        
+        if result.returncode != 0:
+            return set()
+        
+        packages: Set[str] = set()
+        for line in result.stdout.strip().split('\n'):
+            if '==' in line:
+                pkg_name = line.split('==')[0].strip().lower()
                 packages.add(pkg_name)
+            elif line.strip():
+                packages.add(line.strip().lower())
+        
         return packages
-    except Exception as e:
-        print(f"[WARNING] Could not query installed packages: {e}")
+        
+    except Exception:
         return set()
 
-def run_pipeline(input_path: str, github_link: str,  istmp: bool, cleanup_tmp: bool, cleanup_workspace: bool, auto_run: bool):
-    """
-    The main orchestration function for the pipeline.
-    """
-    downloader = Downloader(target_dir=str(TMP_DIR))
-    pdf_path: Optional[Path] = None
 
-    # Ensure the TMP_DIR exists before starting operations
-    Path(TMP_DIR).mkdir(exist_ok=True) 
-
+def clone_repository(github_url: str, target_dir: str) -> bool:
+    """
+    Clone a GitHub repository to the target directory.
+    """
+    print(f"Attempting to clone '{github_url}' into '{target_dir}'...")
+    
+    # Remove existing directory if present
+    if os.path.exists(target_dir):
+        shutil.rmtree(target_dir)
+    
     try:
-        # STEP 1: Handle Input (URL vs. Local PDF)
-        if input_path.lower().startswith('http'):
-            print("--- STEP 1: Input is a URL. Downloading PDF... ---")
-            if downloader.download_pdf(input_path, str(PDF_OUTPUT_FILENAME)):
-                pdf_path = PDF_OUTPUT_FILENAME
-            else:
-                raise ConnectionError(f"Failed to download PDF from: {input_path}")
-        else:
-            print(f"--- STEP 1: Input is a local PDF file. Skipping download... ---\n[INFO] Using local PDF file: {input_path}")
-            pdf_path = Path(input_path)
-            if not pdf_path.is_file():
-                raise FileNotFoundError(f"Local file not found at: {pdf_path}")
-
-        if not pdf_path:
-                raise ValueError("PDF file path could not be determined.")
-
-        print("\n--- STEP 2: Parsing PDF for GitHub Repository URL... ---")
-        github_url: Optional[str] = None
-
-        if github_link:
-            github_url = github_link.strip()
-            print(f"[INFO] GitHub URL overridden by user input: {github_url}")
-        else:
-            github_links: list[str] = PaperParser(str(pdf_path)).extract_github_link()
-            if not github_links:
-                print("[WARNING] No GitHub link found in the paper. Pipeline stops.")
-                return
-            github_url = github_links[0]
-
-        print(f"[SUCCESS] Found GitHub URL: {github_url}")
-
-        # STEP 3: Cloning GitHub Repository
-        print("\n--- STEP 3: Cloning GitHub Repository... ---")
-        if istmp:
-            cloned_repo_path = Path(TMP_DIR) / "repo"
-        else:
-            repo_name = _parse_repo_name_from_github_url(github_url)
-            cloned_repo_path = Path(WORKSPACE_DIR) / repo_name
-            Path(WORKSPACE_DIR).mkdir(parents=True, exist_ok=True)
-        
-        cloned_repo_path.parent.mkdir(parents=True, exist_ok=True)
-        clone_success = downloader.download(github_url, str(cloned_repo_path))
-        if not clone_success:
-            raise RuntimeError(f"Git clone failed for repository: {github_url}")
-        print(f"[SUCCESS] Repository successfully cloned into: {cloned_repo_path}")
-
-        # STEP 4: Dependency Extraction
-        print("\n--- STEP 4: Dependency Extraction using RequirementsExtractor... ---")
-        extractor = RequirementsExtractor(repo_dir=cloned_repo_path, output_dir=str(TMP_DIR))
-        deps = extractor.extract()
-
-        if deps and deps[0] == "__USE_PYPROJECT__":
-            print("[INFO] pyproject.toml detected – installation will be handled via pip install .")
-            use_repo_install = True
-            has_extracted_requirements = False
-
-        elif deps and deps[0] == "__USE_SETUPTOOLS__":
-            print("[INFO] setup.py/setup.cfg detected – installation will be handled via pip install .")
-            use_repo_install = True
-            has_extracted_requirements = False
-
-        else:
-            print(f"[SUCCESS] requirements.txt generated with {len(deps)} dependencies at {REQUIREMENTS_FILE}")
-            use_repo_install = False
-            has_extracted_requirements = bool(deps)
-
-        if has_extracted_requirements and REQUIREMENTS_FILE.exists():
-            repo_req_path = cloned_repo_path / "requirements.txt"
-            if not repo_req_path.exists():
-                shutil.copy(REQUIREMENTS_FILE, repo_req_path)
-                print(f"[INFO] Copied generated requirements into {repo_req_path}")
-            else:
-                alt_req_path = cloned_repo_path / "requirements.generated.txt"
-                shutil.copy(REQUIREMENTS_FILE, alt_req_path)
-                print(f"[INFO] Repo already had requirements.txt, wrote generated deps to {alt_req_path}")
-
-        # STEP 5: Virtual Environment Setup
-        print(f"\n--- STEP 5: Setting up Virtual Environment in {VENV_DIR.name}... ---")
-        create_and_install_venv(
-            repo_dir=str(cloned_repo_path),
-            use_repo_install=use_repo_install,
-            has_extracted_requirements=has_extracted_requirements,
+        result = subprocess.run(
+            ["git", "clone", "--depth", "1", github_url, target_dir],
+            capture_output=True,
+            text=True,
+            timeout=300
         )
-
-        # STEP 6: Demo Creation
-        print("\n--- STEP 6: Creating Demo from Readme via Constructor LLM... ---")
         
-        # Get list of installed packages to pass to demo creator
-        venv_python = get_venv_python_executable(VENV_DIR)
-        installed_packages = get_installed_packages(venv_python)
-        
-        if installed_packages:
-            print(f"[INFO] Detected {len(installed_packages)} installed packages in venv")
-        
-        creator = DemoCreator(
-            cloned_repo_path, 
-            installed_packages=installed_packages  # Pass this info
-        )
-        demo_path = creator.generate_demo()
-
-        if demo_path:
-            print(f"[INFO] Demo script generated at: {demo_path}")
-            print("[INFO] You can now run it with something like:")
-            print(f"       cd {cloned_repo_path}")
-            print(f"       python {demo_path.name}")
+        if result.returncode == 0:
+            print("Cloning successful.")
+            return True
         else:
-            print("[WARNING] Demo generation failed or returned empty code.")
-
-        # STEP 7: Optional auto_run inside the venv
-        if auto_run and demo_path:
-            print("\n--- STEP 7: Auto-running generated demo inside virtualenv... ---")
-            print("[INFO] Running generated_demo.py inside venv...")
+            print(f"[ERROR] Git clone failed: {result.stderr}")
+            return False
             
-            try:
-                result = subprocess.run(
-                    [str(venv_python), str(demo_path.name)],
-                    cwd=str(cloned_repo_path),
-                    capture_output=True,
-                    text=True,
-                    timeout=120  # 2 minute timeout
-                )
-                
-                if result.returncode == 0:
-                    print("[SUCCESS] Demo executed successfully!")
-                    if result.stdout:
-                        print("\n--- Demo Output ---")
-                        print(result.stdout)
-                        print("--- End Demo Output ---")
-                else:
-                    print(f"[WARNING] Demo execution failed with exit code {result.returncode}")
-                    if result.stderr:
-                        print("\n--- Demo Error Output ---")
-                        print(result.stderr)
-                        print("--- End Demo Error Output ---")
-                    
-                    # Check if it's a missing dependency issue
-                    if "ModuleNotFoundError" in result.stderr or "ImportError" in result.stderr:
-                        print("\n[SUGGESTION] The generated demo requires packages not installed in the venv.")
-                        print("[SUGGESTION] You can manually install missing packages or re-run the pipeline.")
-                        
-            except subprocess.TimeoutExpired:
-                print("[WARNING] Demo execution timed out after 2 minutes")
-            except Exception as e:
-                print(f"[WARNING] Demo execution encountered an error: {e}")
-                
-        elif auto_run and not demo_path:
-            print("[WARNING] auto-run was requested, but no demo script was generated.")
-
-    # --- Error Handling ---
-    except FileNotFoundError as e:
-        print(f"[ERROR] Required file not found: {e}", file=sys.stderr)
-        sys.exit(1)
-    except ConnectionError as e:
-        print(f"[ERROR] Network operation failed: {e}", file=sys.stderr)
-        sys.exit(1)
-    except ValueError as e:
-        print(f"[ERROR] Data validation failed: {e}", file=sys.stderr)
-        sys.exit(1)
-    except RuntimeError as e:
-        print(f"[ERROR] Command execution failed (e.g., git, venv, or pipreqs): {e}", file=sys.stderr)
-        sys.exit(1)
+    except subprocess.TimeoutExpired:
+        print("[ERROR] Git clone timed out after 300 seconds.")
+        return False
+    except FileNotFoundError:
+        print("[ERROR] Git is not installed or not in PATH.")
+        return False
     except Exception as e:
-        print(f"[FATAL] An unexpected error occurred: {type(e).__name__} - {e}", file=sys.stderr)
-        sys.exit(1)
-        
-    finally:
-        if cleanup_tmp and Path(TMP_DIR).exists():
-            print(f"[INFO] Cleaning up tmp/ directory...")
-            shutil.rmtree(TMP_DIR, ignore_errors=True)
-        
-        if cleanup_workspace and Path(WORKSPACE_DIR).exists():
-            print(f"[INFO] Cleaning up workspace/ directory...")
-            shutil.rmtree(WORKSPACE_DIR, ignore_errors=True)
+        print(f"[ERROR] Unexpected error during clone: {e}")
+        return False
 
 
-if __name__ == "__main__":
+def run_demo(venv_python: str, demo_path: str, repo_path: str) -> bool:
+    """
+    Execute the generated demo script.
+    """
+    print(f"\n--- Running Demo: {demo_path} ---")
+    
+    try:
+        result = subprocess.run(
+            [venv_python, demo_path],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=600
+        )
+        
+        print("Demo Output:")
+        print(result.stdout)
+        
+        if result.stderr:
+            print("Demo Errors:")
+            print(result.stderr)
+        
+        if result.returncode == 0:
+            print("[SUCCESS] Demo completed successfully!")
+            return True
+        else:
+            print(f"[WARNING] Demo exited with code {result.returncode}")
+            return False
+            
+    except subprocess.TimeoutExpired:
+        print("[ERROR] Demo timed out after 600 seconds.")
+        return False
+    except Exception as e:
+        print(f"[ERROR] Failed to run demo: {e}")
+        return False
+
+
+def main():
     parser = argparse.ArgumentParser(
-        description="A pipeline orchestrator for processing research papers (URL or PDF) to generate code demos."
+        description="Repoduce-Me: Scientific Code Reproducibility Pipeline",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python main.py https://arxiv.org/pdf/2207.12274
+  python main.py paper.pdf --github https://github.com/owner/repo
+  python main.py paper.pdf --tmp --auto-run
+        """
     )
+    
     parser.add_argument(
         "input",
-        type=str,
-        help="The input source, which can be either a full URL (e.g., http://arxiv.org/...) or a local path to a PDF file (e.g., ./paper.pdf).",
+        help="ArXiv URL, PDF URL, or local path to a research paper PDF"
     )
-
     parser.add_argument(
         "--github",
-        type=str,
-        help="The input of a github link if there is one",
+        help="Explicit GitHub repository URL (skips PDF parsing)"
     )
-
     parser.add_argument(
         "--tmp",
         action="store_true",
-        help="Clone the repository into an ephemeral tmp/repo directory instead of the persistent workspace."
+        help="Use ephemeral tmp/ directory instead of workspace/"
     )
-
-    parser.add_argument(
-        "--cleanup-tmp",
-        action="store_true",
-        help="Remove only the tmp/ directory after pipeline completion."
-    )
-
-    parser.add_argument(
-        "--cleanup-workspace",
-        action="store_true",
-        help="Remove only the workspace/ directory after pipeline completion."
-    )
-
-    parser.add_argument(
-        "--cleanup-all",
-        action="store_true",
-        help="Remove BOTH tmp/ and workspace/ directories after pipeline completion."
-    )
-
     parser.add_argument(
         "--auto-run",
-        dest="auto_run",
         action="store_true",
-        help="Flag to automatically run the generated demo inside the created venv."
+        help="Automatically run the generated demo after creation"
+    )
+    parser.add_argument(
+        "--skip-demo",
+        action="store_true",
+        help="Skip demo generation (only setup environment)"
+    )
+    parser.add_argument(
+        "--python",
+        default=None,
+        help="Python executable to use for creating the virtual environment"
+    )
+    parser.add_argument(
+        "--no-cleanup",
+        action="store_true",
+        help="Don't clean up temporary files on failure"
     )
     
     args = parser.parse_args()
     
+    # Determine working directory
+    work_dir = TMP_DIR if args.tmp else WORKSPACE_DIR
+    
+    # Create working directory
+    os.makedirs(work_dir, exist_ok=True)
+    
+    # Define paths - all as absolute paths to avoid confusion
+    work_dir_abs = os.path.abspath(work_dir)
+    repo_dir = os.path.join(work_dir_abs, "repo")
+    venv_dir = os.path.join(work_dir_abs, ".venv_repro")
+    
+    # Demo file goes INSIDE the repo directory (for batch_eval.py compatibility)
+    demo_path = os.path.join(repo_dir, DEMO_FILENAME)
+    
     print(f"\n--- Starting Pipeline Execution with Input: {args.input} ---")
     
-    start_time = time.time()
+    try:
+        # ============================================================
+        # STEP 1: Resolve input to local PDF
+        # ============================================================
+        input_path = args.input
+        
+        if input_path.startswith(('http://', 'https://')):
+            print("--- STEP 1: Input is a URL. Downloading PDF... ---")
+            
+            downloader = Downloader(target_dir=work_dir_abs)
+            pdf_path = os.path.join(work_dir_abs, "downloaded_paper.pdf")
+            
+            success = downloader.download_pdf(input_path, pdf_path)
+            if not success:
+                raise RuntimeError(f"Failed to download PDF from {input_path}")
+            print(f"PDF successfully downloaded on attempt 1.\n")
+        else:
+            print("--- STEP 1: Input is a local file. ---")
+            if not os.path.exists(input_path):
+                raise FileNotFoundError(f"PDF file not found: {input_path}")
+            pdf_path = os.path.abspath(input_path)
+            print(f"[INFO] Using local PDF: {pdf_path}\n")
+        
+        # ============================================================
+        # STEP 2: Extract GitHub URL from PDF (or use provided URL)
+        # ============================================================
+        print("--- STEP 2: Parsing PDF for GitHub Repository URL... ---")
+        
+        if args.github:
+            github_url = args.github
+            print(f"[INFO] Using provided GitHub URL: {github_url}")
+        else:
+            # Create parser with the PDF path
+            paper_parser = PaperParser(pdf_path)
+            github_links = paper_parser.extract_github_link()
+            
+            if not github_links:
+                raise RuntimeError("Could not find GitHub URL in the PDF")
+            
+            # Use the first found link
+            github_url = github_links[0]
+        
+        print(f"[SUCCESS] Found GitHub URL: {github_url}\n")
+        
+        # ============================================================
+        # STEP 3: Clone the repository
+        # ============================================================
+        print("--- STEP 3: Cloning GitHub Repository... ---")
+        
+        if not clone_repository(github_url, repo_dir):
+            raise RuntimeError(f"Failed to clone repository: {github_url}")
+        
+        print(f"[SUCCESS] Repository successfully cloned into: {repo_dir}\n")
+        
+        # ============================================================
+        # STEP 4: Analyze dependencies (informational)
+        # ============================================================
+        print("--- STEP 4: Dependency Extraction using RequirementsExtractor... ---")
+        
+        try:
+            extractor = RequirementsExtractor(repo_dir=repo_dir, output_dir=work_dir_abs)
+            deps = extractor.extract()
+            
+            if deps:
+                if deps[0] == "__USE_PYPROJECT__":
+                    print("[INFO] pyproject.toml detected - installation will be handled via pip install .")
+                elif deps[0] == "__USE_SETUPTOOLS__":
+                    print("[INFO] setup.py/setup.cfg detected - installation will be handled via pip install .")
+                else:
+                    print(f"[INFO] Found {len(deps)} dependencies.")
+        except Exception as e:
+            print(f"[WARNING] Dependency analysis failed: {e}")
+            # Check for pyproject.toml manually
+            pyproject_path = os.path.join(repo_dir, "pyproject.toml")
+            if os.path.exists(pyproject_path):
+                print("[INFO] pyproject.toml detected - installation will be handled via pip install .")
+        
+        print()
+        
+        # ============================================================
+        # STEP 5: Create virtual environment and install dependencies
+        # ============================================================
+        print(f"--- STEP 5: Setting up Virtual Environment in {venv_dir}... ---")
+        
+        success, venv_python = setup_venv_and_install(
+            venv_path=venv_dir,
+            repo_path=repo_dir,
+            python_executable=args.python,
+            preinstall_deps=["numpy", "scipy"]
+        )
+        
+        if not success:
+            raise RuntimeError("Failed to setup virtual environment and install dependencies")
+        
+        print(f"\n[SUCCESS] Virtual environment ready with Python at: {venv_python}\n")
+        
+        # ============================================================
+        # STEP 6: Generate demo (unless skipped)
+        # ============================================================
+        demo_generated = False
+        
+        if not args.skip_demo:
+            print("--- STEP 6: Generating Demo Script... ---")
+            
+            try:
+                # Get installed packages to pass to the demo creator
+                installed_packages = get_installed_packages(venv_python)
+                
+                # Create demo creator
+                # repo_path: where the repo is cloned
+                # output_filename: JUST the filename, not a path
+                creator = DemoCreator(
+                    repo_path=repo_dir,
+                    output_filename=DEMO_FILENAME,
+                    installed_packages=installed_packages
+                )
+                
+                # Generate the demo
+                result_path = creator.generate_demo()
+                
+                if result_path and Path(result_path).exists():
+                    demo_generated = True
+                    demo_path = str(result_path)
+                    print(f"[SUCCESS] Demo script generated at: {demo_path}\n")
+                else:
+                    print("[WARNING] Demo generation failed or was skipped.\n")
+                    
+            except Exception as e:
+                print(f"[WARNING] Demo generation failed: {e}\n")
+                import traceback
+                traceback.print_exc()
+        else:
+            print("--- STEP 6: Skipping Demo Generation (--skip-demo) ---\n")
+        
+        # ============================================================
+        # STEP 7: Auto-run demo if requested
+        # ============================================================
+        if args.auto_run and demo_generated and os.path.exists(demo_path):
+            print("--- STEP 7: Auto-Running Generated Demo... ---")
+            run_demo(venv_python, demo_path, repo_dir)
+        elif args.auto_run:
+            print("--- STEP 7: Skipping Auto-Run (no demo available) ---\n")
+        
+        # ============================================================
+        # Success summary
+        # ============================================================
+        print("\n" + "=" * 60)
+        print("PIPELINE COMPLETED SUCCESSFULLY")
+        print("=" * 60)
+        print(f"  Repository: {repo_dir}")
+        print(f"  Virtual Environment: {venv_dir}")
+        print(f"  Venv Python: {venv_python}")
+        if demo_generated:
+            print(f"  Demo Script: {demo_path}")
+        print()
+        print("To activate the environment:")
+        if os.name == 'nt':
+            print(f"  {venv_dir}\\Scripts\\activate")
+        else:
+            print(f"  source {venv_dir}/bin/activate")
+        print("=" * 60)
+        
+        return 0
+        
+    except FileNotFoundError as e:
+        print(f"\n[ERROR] File not found: {e}")
+        return 1
+    except RuntimeError as e:
+        print(f"\n[ERROR] Pipeline failed: {e}")
+        return 1
+    except KeyboardInterrupt:
+        print("\n[INFO] Pipeline interrupted by user.")
+        return 130
+    except Exception as e:
+        print(f"\n[ERROR] Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
 
-    run_pipeline(
-        args.input,
-        github_link=args.github,
-        istmp=args.tmp,
-        cleanup_tmp=args.cleanup_tmp or args.cleanup_all,
-        cleanup_workspace=args.cleanup_workspace or args.cleanup_all,
-        auto_run=args.auto_run
-    )
-    
-    end_time = time.time()
-    duration = end_time - start_time
-    print(f"\n--- Pipeline Complete in {duration:.2f} seconds. ---")
+
+if __name__ == "__main__":
+    sys.exit(main())

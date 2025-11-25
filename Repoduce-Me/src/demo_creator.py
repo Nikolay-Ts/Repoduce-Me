@@ -1,8 +1,15 @@
+"""
+demo_creator.py - Generate runnable demo scripts using LLM.
+
+This module uses the Constructor LLM to synthesize a runnable demo Python script
+from a cloned repository, primarily based on its README and examples.
+"""
+
 from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Set, List, Any
 
 from constructor_model import ConstructorModel
 
@@ -15,18 +22,63 @@ class DemoCreator:
 
     def __init__(
         self,
-        repo_path: Path,
+        repo_path: Any,
         output_filename: str = "generated_demo.py",
-        max_readme_chars: int = 8000,
-        installed_packages: Optional[set[str]] = None,
+        max_readme_chars: Any = 8000,
+        installed_packages: Any = None,
     ) -> None:
+        """
+        Initialize DemoCreator.
+        
+        Args:
+            repo_path: Path to the repository (str or Path).
+            output_filename: Name of the output demo file.
+            max_readme_chars: Maximum characters to read from README.
+            installed_packages: Set/list of installed package names.
+        """
+        # Ensure repo_path is a Path
         self.repo_path = Path(repo_path).resolve()
-        self.output_path = self.repo_path / output_filename
-        self.max_readme_chars = max_readme_chars
-        self.installed_packages = installed_packages or set()
+        self.output_path = self.repo_path / str(output_filename)
+        
+        # CRITICAL: Ensure max_readme_chars is an integer
+        try:
+            self.max_readme_chars: int = int(max_readme_chars)
+        except (TypeError, ValueError):
+            self.max_readme_chars = 8000
+        
+        # CRITICAL: Ensure installed_packages is a proper set of strings
+        self.installed_packages: Set[str] = self._normalize_packages(installed_packages)
 
-        # Stateless: single-shot code generation
-        self.llm = ConstructorModel(model="gpt-5.1")
+        # Lazy initialization - don't create LLM until needed
+        self._llm: Optional[ConstructorModel] = None
+
+    def _normalize_packages(self, packages: Any) -> Set[str]:
+        """Convert any input to a set of strings safely."""
+        if packages is None:
+            return set()
+        
+        if isinstance(packages, set):
+            return {str(p) for p in packages}
+        
+        if isinstance(packages, (list, tuple, frozenset)):
+            return {str(p) for p in packages}
+        
+        if isinstance(packages, str):
+            # Single package name
+            return {packages}
+        
+        # Try to iterate over it
+        try:
+            return {str(p) for p in packages}
+        except TypeError:
+            return set()
+
+    @property
+    def llm(self) -> ConstructorModel:
+        """Lazy initialization of the LLM."""
+        if self._llm is None:
+            self._llm = ConstructorModel(model="gpt-5.1")
+        return self._llm
 
     # ---------- Public API ----------
 
@@ -52,9 +104,10 @@ class DemoCreator:
 
         # 2) Load example code snippets (if any)
         example_snippets = self._load_example_snippets()
-        if example_snippets.strip():
+        if example_snippets and len(example_snippets.strip()) > 0:
             print("[INFO] Example snippets found and included in the LLM prompt.")
         else:
+            example_snippets = ""
             print("[INFO] No example snippets found; proceeding with README only.")
 
         # 3) Build prompt for Constructor
@@ -74,7 +127,7 @@ class DemoCreator:
 
         # 6) Strip markdown fences if they slip through
         demo_code = self._extract_code(raw_response)
-        if not demo_code or not demo_code.strip():
+        if not demo_code or len(demo_code.strip()) == 0:
             print("[ERROR] LLM response did not contain any recognizable Python code.")
             print("=== DEMO GENERATION: FAILED (EMPTY CODE) ===")
             return None
@@ -90,7 +143,6 @@ class DemoCreator:
         print(f"[SUCCESS] Demo script written to: {self.output_path}")
         print("=== DEMO GENERATION: COMPLETE ===")
         return self.output_path
-
 
     # ---------- Internal helpers ----------
 
@@ -115,9 +167,13 @@ class DemoCreator:
             print(f"[ERROR] Failed to read README: {e}")
             return None
 
-        if len(text) > self.max_readme_chars:
-            print(f"[INFO] Truncating README from {len(text)} -> {self.max_readme_chars} chars.")
-            text = text[: self.max_readme_chars]
+        # CRITICAL: Use explicit int conversion for comparison
+        text_len: int = len(text)
+        max_chars: int = int(self.max_readme_chars)
+        
+        if text_len > max_chars:
+            print(f"[INFO] Truncating README from {text_len} -> {max_chars} chars.")
+            text = text[:max_chars]
 
         return text
 
@@ -136,23 +192,47 @@ class DemoCreator:
             self.repo_path / "sample_script",
         ]
 
-        snippets: list[str] = []
+        snippets: List[str] = []
+        total_length: int = 0
+        
+        # CRITICAL: Use explicit integer constants
+        MAX_FILE_SIZE: int = 8000
+        MAX_TOTAL_SIZE: int = 12000
 
         for d in candidate_dirs:
             if not d.is_dir():
                 continue
 
-            for py_file in sorted(d.glob("*.py")):
+            try:
+                py_files = list(sorted(d.glob("*.py")))
+            except Exception:
+                continue
+
+            for py_file in py_files:
                 try:
                     code = py_file.read_text(encoding="utf-8", errors="ignore")
                 except Exception:
                     continue
 
+                # CRITICAL: Use explicit int for length
+                code_len: int = len(code)
+                
                 # only take smallish example files
-                if len(code) <= 8000:
-                    snippets.append(f"# File: {py_file.relative_to(self.repo_path)}\n{code}")
-                if len("".join(snippets)) > 12000:
+                if code_len <= MAX_FILE_SIZE:
+                    try:
+                        rel_path = py_file.relative_to(self.repo_path)
+                        snippet = f"# File: {rel_path}\n{code}"
+                    except ValueError:
+                        snippet = f"# File: {py_file.name}\n{code}"
+                    
+                    snippets.append(snippet)
+                    total_length = total_length + code_len
+                
+                if total_length > MAX_TOTAL_SIZE:
                     break
+            
+            if total_length > MAX_TOTAL_SIZE:
+                break
 
         return "\n\n".join(snippets)
 
@@ -165,25 +245,37 @@ class DemoCreator:
 
         # Format installed packages list for the prompt
         packages_info = ""
-        if self.installed_packages:
+        
+        # CRITICAL: Get count as explicit int
+        num_packages: int = len(self.installed_packages)
+        
+        if num_packages > 0:
             # Show a sample of installed packages (not all of them to save tokens)
-            sample_packages = sorted(list(self.installed_packages))[:50]
+            pkg_list: List[str] = sorted([str(p) for p in self.installed_packages])
+            sample_packages: List[str] = pkg_list[:50]
+            
             packages_info = (
                 "\n\nIMPORTANT - INSTALLED PACKAGES IN VIRTUAL ENVIRONMENT:\n"
                 "The following packages are confirmed to be installed and available for import:\n"
                 f"{', '.join(sample_packages)}"
-                f"{' (and ' + str(len(self.installed_packages) - 50) + ' more)' if len(self.installed_packages) > 50 else ''}\n"
-                "\nYou MUST ONLY import from packages that are listed above or are part of Python's standard library.\n"
+            )
+            
+            if num_packages > 50:
+                extra: int = num_packages - 50
+                packages_info = packages_info + f" (and {extra} more)"
+            
+            packages_info = packages_info + (
+                "\n\nYou MUST ONLY import from packages that are listed above or are part of Python's standard library.\n"
                 "Do NOT import packages like 'aiohttp', 'requests', 'httpx', etc. unless they appear in the list above.\n"
             )
 
-        prompt_parts = [
+        prompt_parts: List[str] = [
             "You are an AI assistant that generates **runnable Python demo scripts** ",
             "for scientific and simulation code repositories.",
             "",
             f"Repository name: {repo_name}",
             "",
-            packages_info,  # Include installed packages info
+            packages_info,
             "",
             "You are given the repository README and (optionally) some example scripts.",
             "",
@@ -227,8 +319,8 @@ class DemoCreator:
             "README CONTENT END",
         ]
 
-        if example_snippets.strip():
-            prompt_parts += [
+        if example_snippets and len(example_snippets.strip()) > 0:
+            prompt_parts = prompt_parts + [
                 "",
                 "EXAMPLE PYTHON SCRIPTS (for reference only, do NOT just copy-paste them):",
                 "--------------------",
@@ -237,7 +329,7 @@ class DemoCreator:
                 "",
             ]
 
-        prompt_parts += [
+        prompt_parts = prompt_parts + [
             "",
             "Now generate the final demo Python script.",
             "Remember: return ONLY Python code, no ``` fences, no explanation text.",

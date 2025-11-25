@@ -60,7 +60,6 @@ class RequirementsExtractor:
         'xmlrpc', 'zipapp', 'zipfile', 'zipimport', 'zlib', 'zoneinfo'
     }
 
-    # --- 2. Package Name Mapping (Module Name -> PyPI Package Name) ---
     MODULE_TO_PACKAGE: Dict[str, str] = {
         'skimage': 'scikit-image',
         'sklearn': 'scikit-learn',
@@ -82,10 +81,8 @@ class RequirementsExtractor:
         'einops': 'einops',
         'wandb': 'wandb',
         'astropy': 'astropy',
-        # Extend with more mappings as needed
     }
 
-    # Files to check for existing dependencies
     REQUIREMENTS_FILES: List[str] = [
         "requirements.txt",
         "requirements-dev.txt",
@@ -276,7 +273,6 @@ class RequirementsExtractor:
 
             return filtered
 
-        # Nothing
         return None
 
     def analyze_imports(self) -> None:
@@ -301,12 +297,9 @@ class RequirementsExtractor:
         # 1) Try existing metadata/files
         deps = self.find_existing_requirements()
 
-        # Case 1: pyproject/setup detected
         if deps is not None and deps[0] in ("__USE_PYPROJECT__", "__USE_SETUPTOOLS__"):
-            # Do NOT write requirements.txt here; install mode is `pip install .`
             return deps
 
-        # Case 2: requirements*.txt was found and yielded deps
         if deps is not None:
             self._write_requirements_file(deps)
             return deps

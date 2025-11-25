@@ -10,7 +10,7 @@ from constructor_model import ConstructorModel
 class PaperParser:
     """A parser to extract GitHub links from the pdf provided"""
 
-    def __init__(self, paper_filepath: str):
+    def __init__(self, paper_filepath: str = ""):
         self.paper_filepath = paper_filepath
         self.llm = ConstructorModel(model="gpt-5.1")
 

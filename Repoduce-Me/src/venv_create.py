@@ -1,281 +1,492 @@
+"""
+venv_create.py - Virtual Environment Creation and Dependency Installation
+
+This module handles creating isolated Python virtual environments and installing
+dependencies from cloned repositories. It supports pyproject.toml, setup.py,
+and requirements.txt based projects.
+"""
+
+import os
 import sys
 import subprocess
+import shutil
 from pathlib import Path
-from typing import List
-import shutil 
-import os
-import re
+from typing import Optional, Tuple, List
 
-# Configuration constants (must match main.py)
-TMP_DIR = "tmp"
-VENV_DIR = Path(TMP_DIR) / ".venv_repro"
-REQUIREMENTS_FILE = Path(TMP_DIR) / "requirements.txt"
-REQUIREMENTS_FILTERED_FILE = Path(TMP_DIR) / "requirements_filtered.txt"
 
-BASE_PYTHON = os.environ.get("REPRO_PYTHON", sys.executable)
+class VenvCreationError(Exception):
+    """Custom exception for venv creation failures."""
+    pass
 
-def get_venv_python_executable(venv_path: Path) -> Path:
-    """Determines the path to the venv's Python executable based on the operating system."""
-    venv_path = venv_path.resolve()
+
+class DependencyInstallError(Exception):
+    """Custom exception for dependency installation failures."""
+    pass
+
+
+def get_venv_python(venv_path: str) -> str:
+    """
+    Get the Python executable path inside a virtual environment.
     
-    if sys.platform.startswith('win'):
-        return venv_path / "Scripts" / "python.exe"
-    else:
-        # Assumes Linux/macOS
-        return venv_path / "bin" / "python"
+    Args:
+        venv_path: Path to the virtual environment directory.
+        
+    Returns:
+        Path to the Python executable inside the venv.
+    """
+    if os.name == 'nt':  # Windows
+        return os.path.join(venv_path, 'Scripts', 'python.exe')
+    else:  # Unix/macOS
+        return os.path.join(venv_path, 'bin', 'python')
 
 
-def execute_subprocess(command: List[str], error_message: str, cwd: str = None):
-    """Utility to run a subprocess command with check=True and custom error handling."""
+def get_venv_pip(venv_path: str) -> str:
+    """
+    Get the pip executable path inside a virtual environment.
+    
+    Args:
+        venv_path: Path to the virtual environment directory.
+        
+    Returns:
+        Path to the pip executable inside the venv.
+    """
+    if os.name == 'nt':  # Windows
+        return os.path.join(venv_path, 'Scripts', 'pip.exe')
+    else:  # Unix/macOS
+        return os.path.join(venv_path, 'bin', 'pip')
+
+
+def run_command(
+    cmd: List[str],
+    cwd: Optional[str] = None,
+    env: Optional[dict] = None,
+    description: str = "Command"
+) -> Tuple[int, str, str]:
+    """
+    Run a subprocess command with proper error handling.
+    
+    Args:
+        cmd: Command and arguments as a list.
+        cwd: Working directory for the command.
+        env: Environment variables dictionary.
+        description: Human-readable description of the command.
+        
+    Returns:
+        Tuple of (return_code, stdout, stderr)
+    """
     try:
-        # check=True raises CalledProcessError if the command fails
-        result = subprocess.run(command, check=True, capture_output=True, text=True, cwd=cwd)
-        return result
-    except subprocess.CalledProcessError as e:
-        print(f"[ERROR] {error_message} (External command failed).", file=sys.stderr)
-        # Print the error output for debugging
-        print(f"Command: {' '.join(command)}", file=sys.stderr)
-        print(f"Stderr:\n{e.stderr}", file=sys.stderr)
-        raise RuntimeError(f"{error_message} failed.")
-
-def _normalize_requirement_line(raw: str) -> str | None:
-    """
-    Normalize problematic requirement specs for compatibility with the current Python.
-
-    - Strip CUDA suffixes like '+cu121'
-    - Relax numpy, scipy, torch pins (let pip pick a compatible version)
-    - Ignore nested '-r otherfile.txt' includes
-    """
-    line = raw.strip()
-    if not line or line.startswith("#"):
-        return None
-
-    # Ignore nested requirement includes for now
-    if line.lower().startswith("-r "):
-        print(f"[WARNING] Ignoring nested requirements include: {line}")
-        return None
-
-    # Strip CUDA local version tags: 'torch==2.1.2+cu121' -> 'torch==2.1.2'
-    line = re.sub(r"\+cu[0-9]+", "", line, flags=re.IGNORECASE)
-
-    # Extract package name best-effort
-    m = re.match(r"^\s*([A-Za-z0-9_\-]+)", line)
-    name = m.group(1).lower() if m else ""
-
-    # Unpin packages that commonly have Python version conflicts
-    if name == "numpy":
-        print(f"[INFO] Normalizing numpy requirement: '{raw.strip()}' -> 'numpy'")
-        return "numpy"
-
-    if name == "scipy":
-        print(f"[INFO] Normalizing scipy requirement: '{raw.strip()}' -> 'scipy'")
-        return "scipy"
-
-    if name == "torch":
-        print(f"[INFO] Normalizing torch requirement: '{raw.strip()}' -> 'torch'")
-        return "torch"
-    
-    if name == "torchvision":
-        print(f"[INFO] Normalizing torchvision requirement: '{raw.strip()}' -> 'torchvision'")
-        return "torchvision"
-    
-    if name == "torchaudio":
-        print(f"[INFO] Normalizing torchaudio requirement: '{raw.strip()}' -> 'torchaudio'")
-        return "torchaudio"
-
-    return line
-
-def _build_filtered_requirements() -> None:
-    """
-    Read REQUIREMENTS_FILE, normalize each line, and write REQUIREMENTS_FILTERED_FILE.
-    """
-    if not REQUIREMENTS_FILE.exists():
-        print(f"[INFO] No {REQUIREMENTS_FILE} present; skipping requirement normalization.")
-        return
-
-    normalized: list[str] = []
-    with REQUIREMENTS_FILE.open("r", encoding="utf-8") as f:
-        for raw in f:
-            norm = _normalize_requirement_line(raw)
-            if norm:
-                normalized.append(norm)
-
-    if not normalized:
-        print("[WARNING] No dependencies remained after normalization.")
-    else:
-        print(
-            f"[INFO] Writing {len(normalized)} normalized dependencies to {REQUIREMENTS_FILTERED_FILE}."
+        result = subprocess.run(
+            cmd,
+            cwd=cwd,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=600  # 10 minute timeout
         )
+        return result.returncode, result.stdout, result.stderr
+    except subprocess.TimeoutExpired:
+        return -1, "", f"{description} timed out after 600 seconds"
+    except Exception as e:
+        return -1, "", f"{description} failed with exception: {str(e)}"
 
-    with REQUIREMENTS_FILTERED_FILE.open("w", encoding="utf-8") as f:
-        for dep in normalized:
-            f.write(dep + "\n")
 
-def create_and_install_venv(
-    repo_dir: str,
-    use_repo_install: bool,
-    has_extracted_requirements: bool,
-):
+def create_virtual_environment(
+    venv_path: str,
+    python_executable: Optional[str] = None
+) -> str:
     """
-    Creates a virtual environment and installs dependencies using the most appropriate method:
-    1. If use_repo_install is True (pyproject.toml or setup.py exists), use `pip install .`.
-    2. Otherwise, use `pip install -r requirements_filtered.txt` (normalized deps).
+    Create a new virtual environment.
+    
+    Args:
+        venv_path: Path where the virtual environment should be created.
+        python_executable: Python interpreter to use. Defaults to sys.executable.
+        
+    Returns:
+        Path to the Python executable inside the created venv.
+        
+    Raises:
+        VenvCreationError: If venv creation fails.
     """
-    # Clean up the previous filtered file if it exists
-    if REQUIREMENTS_FILTERED_FILE.exists():
-        os.remove(REQUIREMENTS_FILTERED_FILE)
+    if python_executable is None:
+        python_executable = sys.executable
     
-    print(f"[INFO] Creating virtual environment at {VENV_DIR} using {BASE_PYTHON}...")
+    # Remove existing venv if present
+    if os.path.exists(venv_path):
+        print(f"[INFO] Removing existing virtual environment at {venv_path}...")
+        shutil.rmtree(venv_path)
     
-    # Check Python version compatibility
-    import sys as system_sys
-    py_version = system_sys.version_info
-    if py_version >= (3, 12):
-        print(f"[WARNING] Using Python {py_version.major}.{py_version.minor} - some old packages may not install.")
-        print(f"[WARNING] Consider using Python 3.11 or earlier for better compatibility.")
+    print(f"[INFO] Creating virtual environment at {venv_path} using {python_executable}...")
     
-    execute_subprocess(
-        [BASE_PYTHON, "-m", "venv", str(VENV_DIR)],
-        "Virtual environment creation",
+    # Create the virtual environment
+    returncode, stdout, stderr = run_command(
+        [python_executable, "-m", "venv", venv_path],
+        description="venv creation"
     )
     
-    # CRITICAL: Get ABSOLUTE path to venv Python to avoid path resolution issues
-    python_executable = get_venv_python_executable(VENV_DIR).resolve()
+    if returncode != 0:
+        raise VenvCreationError(f"Failed to create virtual environment: {stderr}")
     
-    # Verify venv Python is working
-    result = subprocess.run(
-        [str(python_executable), "--version"],
-        capture_output=True,
-        text=True,
+    # Verify the venv Python exists
+    venv_python = get_venv_python(venv_path)
+    if not os.path.exists(venv_python):
+        raise VenvCreationError(f"Venv Python not found at {venv_python}")
+    
+    # Verify the venv Python works
+    returncode, stdout, stderr = run_command(
+        [venv_python, "--version"],
+        description="venv Python version check"
     )
-    print(f"[INFO] Virtual environment Python: {result.stdout.strip()}")
+    
+    if returncode != 0:
+        raise VenvCreationError(f"Venv Python not working: {stderr}")
+    
+    print(f"[INFO] Virtual environment Python: {stdout.strip()}")
+    print(f"[SUCCESS] Virtual environment created at {venv_path}")
+    
+    return venv_python
 
-    # --- 5a. Upgrade Core Build Tools ---
+
+def upgrade_build_tools(venv_python: str) -> None:
+    """
+    Upgrade pip, setuptools, and wheel in the virtual environment.
+    
+    Args:
+        venv_python: Path to the venv's Python executable.
+        
+    Raises:
+        DependencyInstallError: If upgrade fails.
+    """
     print("[INFO] Upgrading pip, setuptools, and wheel in the virtual environment...")
-    execute_subprocess(
-        [str(python_executable), '-m', 'pip', 'install', '--upgrade', 'pip', 'setuptools', 'wheel'],
-        "Upgrade of core build tools"
+    
+    # Create environment with SETUPTOOLS_USE_DISTUTILS to avoid conflicts
+    env = os.environ.copy()
+    env["SETUPTOOLS_USE_DISTUTILS"] = "stdlib"
+    
+    returncode, stdout, stderr = run_command(
+        [venv_python, "-m", "pip", "install", "--upgrade", 
+         "pip", "setuptools", "wheel"],
+        env=env,
+        description="build tools upgrade"
     )
-    print("[SUCCESS] Core build tools upgraded.")
-
-    # --- 5b. Pre-installing Critical Build Dependencies (numpy, scipy) ---
-    packages_to_preinstall = ['numpy', 'scipy']
-    print(f"[INFO] Pre-installing critical build dependencies: {', '.join(packages_to_preinstall)}...")
     
-    for package in ['numpy', 'scipy']:
-        if package in packages_to_preinstall:
-            try:
-                execute_subprocess(
-                    [str(python_executable), '-m', 'pip', 'install', package],
-                    f"Pre-installation of {package}"
-                )
-                print(f"[SUCCESS] '{package}' pre-installed.")
-                packages_to_preinstall.remove(package)
-            except Exception as e:
-                print(f"[WARNING] Failed to pre-install {package}: {e}. Proceeding with main installation.", file=sys.stderr)
+    if returncode != 0:
+        print(f"[WARNING] Build tools upgrade had issues: {stderr}")
+        # Don't fail here, try to continue
+    else:
+        print("[SUCCESS] Core build tools upgraded.")
 
-    # --- 5c. Main Dependency Installation ---
-    repo_path = Path(repo_dir).resolve()  # Make absolute
 
-    if use_repo_install:
-        # Strategy 1: Use pip install . on the repository directory
-        print(f"[INFO] Installing dependencies using 'pip install .' from {repo_path}...")
+def preinstall_build_dependencies(venv_python: str, dependencies: List[str]) -> None:
+    """
+    Pre-install critical build dependencies that are commonly needed.
+    
+    Args:
+        venv_python: Path to the venv's Python executable.
+        dependencies: List of package names to pre-install.
+    """
+    env = os.environ.copy()
+    env["SETUPTOOLS_USE_DISTUTILS"] = "stdlib"
+    
+    print(f"[INFO] Pre-installing critical build dependencies: {', '.join(dependencies)}...")
+    
+    for dep in dependencies:
+        returncode, stdout, stderr = run_command(
+            [venv_python, "-m", "pip", "install", "--no-cache-dir", dep],
+            env=env,
+            description=f"pre-install {dep}"
+        )
         
-        # Check if setup.py has a valid version string
-        setup_py = repo_path / "setup.py"
-        if setup_py.exists():
-            try:
-                content = setup_py.read_text(encoding="utf-8")
-                # Look for malformed version strings like '0.0.0-theta'
-                if re.search(r'version\s*=\s*["\'][0-9]+\.[0-9]+\.[0-9]+-[a-z]+["\']', content, re.IGNORECASE):
-                    print(f"[WARNING] Detected potentially invalid version string in setup.py")
-                    print(f"[WARNING] This may cause installation to fail")
-            except Exception:
-                pass  # If we can't read it, just try anyway
-        
-        # CRITICAL FIX: Use "." as the install target, since cwd is already set to repo_path
-        # Also use --no-build-isolation to prevent creating a separate build venv
-        install_command = [
-            str(python_executable), 
-            '-m', 
-            'pip', 
-            'install',
-            '--no-cache-dir',
-            '--no-build-isolation',  # Prevent separate build environment
-            '-e',  # Editable install to avoid copying
-            '.',
-        ]
-        
-        try:
-            execute_subprocess(
-                install_command, 
-                "Final dependency installation (pip install .)",
-                cwd=str(repo_path)  # Run from inside the repo directory
-            )
-        except RuntimeError as e:
-            # If editable install fails, try regular install
-            print(f"[WARNING] Editable install failed, trying regular install: {e}")
-            install_command = [
-                str(python_executable), 
-                '-m', 
-                'pip', 
-                'install',
-                '--no-cache-dir',
-                '--no-build-isolation',
-                '.',
-            ]
-            try:
-                execute_subprocess(
-                    install_command, 
-                    "Final dependency installation (pip install . fallback)",
-                    cwd=str(repo_path)
-                )
-            except RuntimeError:
-                # Last resort: try without no-build-isolation
-                print(f"[WARNING] Regular install also failed, trying with build isolation...")
-                install_command = [
-                    str(python_executable), 
-                    '-m', 
-                    'pip', 
-                    'install',
-                    '--no-cache-dir',
-                    '.',
-                ]
-                execute_subprocess(
-                    install_command, 
-                    "Final dependency installation (last resort)",
-                    cwd=str(repo_path)
-                )
-
-    elif has_extracted_requirements:
-        # Strategy 2: Use normalized requirements file
-        _build_filtered_requirements()
-
-        if REQUIREMENTS_FILTERED_FILE.exists() and REQUIREMENTS_FILTERED_FILE.stat().st_size > 0:
-            print(
-                f"[INFO] Installing dependencies from {REQUIREMENTS_FILTERED_FILE.name} into venv..."
-            )
-            
-            # Use absolute path for requirements file since we're not changing cwd
-            requirements_absolute = REQUIREMENTS_FILTERED_FILE.resolve()
-            
-            install_command = [
-                str(python_executable),
-                "-m",
-                "pip",
-                "install",
-                "--no-cache-dir",
-                "-r",
-                str(requirements_absolute),
-            ]
-            execute_subprocess(
-                install_command,
-                "Final dependency installation (requirements file)",
-            )
+        if returncode == 0:
+            print(f"[SUCCESS] '{dep}' pre-installed.")
         else:
-            print(
-                "[WARNING] Skipping main dependency installation: filtered requirements file is missing or empty."
-            )
-            return
+            print(f"[WARNING] Failed to pre-install '{dep}': {stderr[:200]}")
+
+
+def detect_install_method(repo_path: str) -> str:
+    """
+    Detect the best installation method for a repository.
     
-    print("[SUCCESS] Virtual environment setup and dependency installation complete.")
+    Args:
+        repo_path: Path to the cloned repository.
+        
+    Returns:
+        One of: 'pyproject', 'setup', 'requirements', 'none'
+    """
+    repo_path = Path(repo_path)
+    
+    if (repo_path / "pyproject.toml").exists():
+        print("[INFO] Found pyproject.toml. Will install via `pip install .`.")
+        return 'pyproject'
+    elif (repo_path / "setup.py").exists():
+        print("[INFO] Found setup.py. Will install via `pip install .`.")
+        return 'setup'
+    elif (repo_path / "requirements.txt").exists():
+        print("[INFO] Found requirements.txt. Will install via `pip install -r requirements.txt`.")
+        return 'requirements'
+    else:
+        print("[WARNING] No standard dependency file found.")
+        return 'none'
+
+
+def install_from_pyproject_or_setup(
+    venv_python: str,
+    repo_path: str,
+    editable: bool = False
+) -> bool:
+    """
+    Install a package from pyproject.toml or setup.py.
+    
+    Args:
+        venv_python: Path to the venv's Python executable.
+        repo_path: Path to the repository.
+        editable: Whether to install in editable mode.
+        
+    Returns:
+        True if installation succeeded, False otherwise.
+    """
+    env = os.environ.copy()
+    env["SETUPTOOLS_USE_DISTUTILS"] = "stdlib"
+    
+    # Strategy 1: Try editable install if requested
+    if editable:
+        print(f"[INFO] Attempting editable install from {repo_path}...")
+        returncode, stdout, stderr = run_command(
+            [venv_python, "-m", "pip", "install", "--no-cache-dir", "-e", "."],
+            cwd=repo_path,
+            env=env,
+            description="editable install"
+        )
+        
+        if returncode == 0:
+            print("[SUCCESS] Editable install completed.")
+            return True
+        else:
+            print(f"[WARNING] Editable install failed, trying regular install...")
+            print(f"  Error: {stderr[:300]}")
+    
+    # Strategy 2: Regular install without build isolation
+    print(f"[INFO] Installing dependencies using 'pip install .' from {repo_path}...")
+    returncode, stdout, stderr = run_command(
+        [venv_python, "-m", "pip", "install", "--no-cache-dir", "--no-build-isolation", "."],
+        cwd=repo_path,
+        env=env,
+        description="regular install (no build isolation)"
+    )
+    
+    if returncode == 0:
+        print("[SUCCESS] Package installed successfully.")
+        return True
+    
+    print(f"[WARNING] Regular install failed: {stderr[:300]}")
+    
+    # Strategy 3: Try with build isolation
+    print("[INFO] Retrying with build isolation...")
+    returncode, stdout, stderr = run_command(
+        [venv_python, "-m", "pip", "install", "--no-cache-dir", "."],
+        cwd=repo_path,
+        env=env,
+        description="install with build isolation"
+    )
+    
+    if returncode == 0:
+        print("[SUCCESS] Package installed with build isolation.")
+        return True
+    
+    print(f"[WARNING] Build isolation install failed: {stderr[:300]}")
+    
+    # Strategy 4: Try installing just the dependencies from pyproject.toml
+    pyproject_path = Path(repo_path) / "pyproject.toml"
+    if pyproject_path.exists():
+        print("[INFO] Attempting to extract and install dependencies from pyproject.toml...")
+        deps = extract_dependencies_from_pyproject(str(pyproject_path))
+        if deps:
+            returncode, stdout, stderr = run_command(
+                [venv_python, "-m", "pip", "install", "--no-cache-dir"] + deps,
+                env=env,
+                description="install extracted dependencies"
+            )
+            if returncode == 0:
+                print("[SUCCESS] Dependencies from pyproject.toml installed.")
+                return True
+    
+    return False
+
+
+def extract_dependencies_from_pyproject(pyproject_path: str) -> List[str]:
+    """
+    Extract dependencies from pyproject.toml file.
+    
+    Args:
+        pyproject_path: Path to pyproject.toml file.
+        
+    Returns:
+        List of dependency strings.
+    """
+    try:
+        import tomllib
+    except ImportError:
+        try:
+            import tomli as tomllib
+        except ImportError:
+            print("[WARNING] Neither tomllib nor tomli available for parsing pyproject.toml")
+            return []
+    
+    try:
+        with open(pyproject_path, "rb") as f:
+            data = tomllib.load(f)
+        
+        deps = []
+        
+        # Check project.dependencies
+        if "project" in data and "dependencies" in data["project"]:
+            deps.extend(data["project"]["dependencies"])
+        
+        # Check build-system.requires
+        if "build-system" in data and "requires" in data["build-system"]:
+            deps.extend(data["build-system"]["requires"])
+        
+        return deps
+    except Exception as e:
+        print(f"[WARNING] Failed to parse pyproject.toml: {e}")
+        return []
+
+
+def install_from_requirements(venv_python: str, repo_path: str) -> bool:
+    """
+    Install dependencies from requirements.txt.
+    
+    Args:
+        venv_python: Path to the venv's Python executable.
+        repo_path: Path to the repository.
+        
+    Returns:
+        True if installation succeeded, False otherwise.
+    """
+    env = os.environ.copy()
+    env["SETUPTOOLS_USE_DISTUTILS"] = "stdlib"
+    
+    requirements_file = os.path.join(repo_path, "requirements.txt")
+    
+    print(f"[INFO] Installing from requirements.txt...")
+    returncode, stdout, stderr = run_command(
+        [venv_python, "-m", "pip", "install", "--no-cache-dir", "-r", requirements_file],
+        env=env,
+        description="requirements.txt install"
+    )
+    
+    if returncode == 0:
+        print("[SUCCESS] Requirements installed successfully.")
+        return True
+    
+    print(f"[ERROR] Failed to install requirements: {stderr[:500]}")
+    return False
+
+
+def setup_venv_and_install(
+    venv_path: str,
+    repo_path: str,
+    python_executable: Optional[str] = None,
+    preinstall_deps: Optional[List[str]] = None
+) -> Tuple[bool, str]:
+    """
+    Main function to create venv and install all dependencies.
+    
+    Args:
+        venv_path: Path where the virtual environment should be created.
+        repo_path: Path to the cloned repository.
+        python_executable: Python interpreter to use. Defaults to sys.executable.
+        preinstall_deps: List of packages to pre-install before main installation.
+        
+    Returns:
+        Tuple of (success: bool, venv_python_path: str)
+    """
+    if preinstall_deps is None:
+        preinstall_deps = ["numpy", "scipy"]
+    
+    try:
+        # Step 1: Create the virtual environment
+        venv_python = create_virtual_environment(venv_path, python_executable)
+        
+        # Step 2: Upgrade build tools (pip, setuptools, wheel)
+        upgrade_build_tools(venv_python)
+        
+        # Step 3: Pre-install critical build dependencies
+        if preinstall_deps:
+            preinstall_build_dependencies(venv_python, preinstall_deps)
+        
+        # Step 4: Detect installation method
+        install_method = detect_install_method(repo_path)
+        
+        # Step 5: Install based on detected method
+        success = False
+        
+        if install_method in ('pyproject', 'setup'):
+            success = install_from_pyproject_or_setup(venv_python, repo_path)
+        elif install_method == 'requirements':
+            success = install_from_requirements(venv_python, repo_path)
+        else:
+            print("[WARNING] No installation method detected. Venv created but no deps installed.")
+            success = True  # Venv created successfully, just no deps
+        
+        if success:
+            print(f"[SUCCESS] Virtual environment ready at: {venv_path}")
+            return True, venv_python
+        else:
+            print(f"[ERROR] Dependency installation failed.")
+            return False, venv_python
+            
+    except VenvCreationError as e:
+        print(f"[ERROR] Virtual environment creation failed: {e}")
+        return False, ""
+    except Exception as e:
+        print(f"[ERROR] Unexpected error during venv setup: {e}")
+        return False, ""
+
+
+# For backwards compatibility and direct usage
+def create_venv_and_install_dependencies(
+    venv_path: str,
+    repo_path: str,
+    python_executable: Optional[str] = None
+) -> Tuple[bool, str]:
+    """
+    Backwards-compatible wrapper for setup_venv_and_install.
+    
+    Args:
+        venv_path: Path where the virtual environment should be created.
+        repo_path: Path to the cloned repository.
+        python_executable: Python interpreter to use.
+        
+    Returns:
+        Tuple of (success: bool, venv_python_path: str)
+    """
+    return setup_venv_and_install(venv_path, repo_path, python_executable)
+
+
+if __name__ == "__main__":
+    # Example usage / testing
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Create venv and install dependencies")
+    parser.add_argument("repo_path", help="Path to the repository")
+    parser.add_argument("--venv-path", default=".venv_repro", help="Path for virtual environment")
+    parser.add_argument("--python", default=None, help="Python executable to use")
+    
+    args = parser.parse_args()
+    
+    success, venv_python = setup_venv_and_install(
+        args.venv_path,
+        args.repo_path,
+        args.python
+    )
+    
+    if success:
+        print(f"\n✅ Setup complete! Activate with:")
+        if os.name == 'nt':
+            print(f"   {args.venv_path}\\Scripts\\activate")
+        else:
+            print(f"   source {args.venv_path}/bin/activate")
+        sys.exit(0)
+    else:
+        print("\n❌ Setup failed!")
+        sys.exit(1)
